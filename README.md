@@ -32,6 +32,10 @@ python -m mpcns_post.cli inspect-manifest /path/to/DATA_bin
 python -m mpcns_post.cli validate-static /path/to/DATA_bin
 python -m mpcns_post.cli validate-case /path/to/DATA_bin --data-dir /path/to/DATA
 python -m mpcns_post.cli summary /path/to/DATA_bin --data-dir /path/to/DATA
+python -m mpcns_post.cli export-tecplot /path/to/DATA_bin \
+  --data-dir /path/to/DATA \
+  --output-dir /path/to/post_output \
+  --prefix mercury
 ```
 
 ## Confirmed version-1 layouts
@@ -100,5 +104,38 @@ Python execution is included in this stage.
 
 The current bundled five-rank sample passes the complete validator. Its 54,150
 Solid cells intentionally have inactive fluid species state, while all 216,600
-Fluid cells are populated. See `VALIDATION_RESULTS.md` for the reproducible
-report.
+Fluid cells are populated.
+
+## Tecplot binary export
+
+`export-tecplot` is case-independent and writes Tecplot 112 binary ordered-zone
+files without requiring Tecplot, PyTecplot, or MPI. Every rank-local structured
+block becomes one named zone; all zones for the same physical group are merged
+into one file. Zone names include rank, local block, and `Fluid`/`Solid`.
+
+Node-centered structured output is the default. It applies the stored global
+`cell_scalar_to_node` operator before splitting arrays into block zones, so the
+same physical Node receives exactly the same value in every rank/zone alias.
+At Fluid/Solid boundaries, Fluid quantities use only applicable Fluid Cells and
+renormalize the remaining weights. The operator is CSR topology based: it does
+not assume eight surrounding Cells, and singular-Edge endpoint Nodes use their
+actual global incident-Cell rows. Retain cell-center output with
+`--location cell`; use `--location node` explicitly if desired.
+
+Two location-suffixed files are emitted:
+
+- `<prefix>_fluid_node.plt` (or `_cell.plt`): neutral Na concentration, H+/Na+ number density,
+  velocity, pressure, and temperature. Only Fluid zones are included.
+- `<prefix>_electromagnetic_node.plt` (or `_cell.plt`): total magnetic field and current-density
+  components for Fluid and Solid zones, plus `PhysicsCode`.
+
+The units are encoded in variable names: coordinates in Mercury radii, number
+density in cm^-3, velocity in km/s, pressure in nPa, temperature in K, magnetic
+field in nT, and current density in nA/m^2. Neutral Na is recovered from the
+saved photo-production field using the solver-defined illuminated/shadow
+frequencies; different cases can override them with
+`--illuminated-frequency` and `--shadow-frequency`. Total B is induced B plus the saved additive field. Current is a
+cell-centered curvilinear numerical curl of induced B, normalized by the
+manifest `current_density_ref`; it is not the solver's unavailable mimetic
+J-edge reconstruction. Each output is immediately read back to exact EOF, and
+an `<prefix>_export_summary.json` is written beside the PLT files.
