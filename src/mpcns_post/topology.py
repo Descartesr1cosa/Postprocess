@@ -29,7 +29,15 @@ def read_rank_topology(path: str | Path, *, rank: int, manifest: Manifest) -> Ra
     missing=required-s.keys()
     if missing: raise ValidationError(f"{path}: missing topology sections {sorted(missing)}")
     f2e=CSRConnectivity(v("face_edge_offsets"),v("face_edge_ids"),v("face_edge_signs").astype(np.int32)); validate_csr(f2e.offsets,f2e.indices,signs=f2e.signs,name="face_to_edge")
-    c2f=CSRConnectivity(v("cell_face_offsets"),v("cell_face_ids"),v("cell_face_signs").astype(np.int32)); validate_csr(c2f.offsets,c2f.indices,signs=c2f.signs,name="cell_to_face")
+    c2f=CSRConnectivity(
+        v("cell_face_offsets"),
+        v("cell_face_ids"),
+        v("cell_face_signs").astype(np.int32),
+        row_global_ids=v("cell_global_id"),
+    )
+    validate_csr(c2f.offsets,c2f.indices,signs=c2f.signs,name="cell_to_face")
+    if c2f.row_global_ids.size != c2f.offsets.size - 1:
+        raise ValidationError(f"{path}: cell_to_face row key mismatch")
     rel=[]
     for prefix in ("node","edge","face"):
         key_name=prefix+"_global_id" if prefix=="node" else prefix+"_cell_global_id"

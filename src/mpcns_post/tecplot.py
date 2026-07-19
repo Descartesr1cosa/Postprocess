@@ -10,6 +10,7 @@ from typing import Mapping, Sequence
 import numpy as np
 
 from .assemble import GlobalIDIndex
+from .access import Selection, base_location
 from .derived import curvilinear_curl, neutral_sodium_from_photo_rate, species_temperature_kelvin
 from .errors import BinaryFormatError, ValidationError
 
@@ -124,6 +125,127 @@ def inspect_tecplot_binary(path: str|Path) -> TecplotFileInfo:
     return TecplotFileInfo(r.path,title,variables,tuple(zones))
 
 
+def _scalar_tecplot_fields(
+    fields: Mapping[str, np.ndarray],
+    entity_count: int,
+) -> dict[str, np.ndarray]:
+    """Validate global arrays and expand vector/tensor components to scalars."""
+    scalar_fields: dict[str, np.ndarray] = {}
+    component_labels = ("x", "y", "z")
+    for name, values in fields.items():
+        array = np.asarray(values)
+        if array.ndim == 0 or array.shape[0] != entity_count:
+            raise ValidationError(
+                f"field {name!r} must have leading size {entity_count}, got {array.shape}"
+            )
+        if array.ndim == 1:
+            scalar_fields[str(name)] = array
+            continue
+        flattened = array.reshape((entity_count, -1))
+        for component in range(flattened.shape[1]):
+            suffix = (
+                component_labels[component]
+                if flattened.shape[1] == 3
+                else str(component)
+            )
+            scalar_fields[f"{name}_{suffix}"] = flattened[:, component]
+    if not scalar_fields:
+        raise ValueError("at least one field is required")
+    return scalar_fields
+
+
+def _selected_zone_values(
+    block,
+    global_values: Mapping[str, np.ndarray],
+    selection_mask: np.ndarray | None,
+) -> dict[str, np.ndarray] | None:
+    arrays = {name: block.reshape(values) for name, values in global_values.items()}
+    if selection_mask is None:
+        return arrays
+    local_mask = block.reshape(selection_mask)
+    positions = np.argwhere(local_mask)
+    if positions.size == 0:
+        return None
+
+    lower = positions.min(axis=0)
+    upper = positions.max(axis=0) + 1
+    slices = tuple(slice(int(lo), int(hi)) for lo, hi in zip(lower, upper))
+    rectangular = bool(np.all(local_mask[slices])) and int(np.prod(upper - lower)) == positions.shape[0]
+    if rectangular:
+        return {name: values[slices] for name, values in arrays.items()}
+
+    # A sphere or oblique plane is not a tensor-product subset. It remains one
+    # zone per source block, represented as an ordered point strip.
+    return {
+        name: values[local_mask].reshape((-1, 1, 1))
+        for name, values in arrays.items()
+    }
+
+
+def export_fields_tecplot(
+    case,
+    fields: Mapping[str, np.ndarray],
+    output_path: str | Path,
+    *,
+    location: str = "cell",
+    selection: Selection | None = None,
+    title: str = "MPCNS fields",
+) -> TecplotFileInfo:
+    """Export arbitrary global fields while retaining one zone per block.
+
+    Vector fields are expanded to ``_x/_y/_z`` variables. Axis-aligned plane
+    and box selections remain structured sub-zones. Non-tensor-product regions
+    (for example a sphere) remain separated by block and are written as ordered
+    point strips with shape ``(N, 1, 1)``.
+    """
+    normalized_location = base_location(location)
+    entities = case.entity(normalized_location)
+    if selection is not None:
+        if selection.location != normalized_location or selection.mask.shape != (
+            entities.size,
+        ):
+            raise ValueError("selection location/order does not match export location")
+
+    scalar_fields = _scalar_tecplot_fields(fields, entities.size)
+    all_values: dict[str, np.ndarray] = {
+        "X": entities.coordinates[:, 0],
+        "Y": entities.coordinates[:, 1],
+        "Z": entities.coordinates[:, 2],
+        **scalar_fields,
+    }
+    if len(all_values) != len(scalar_fields) + 3:
+        raise ValueError("field names X, Y, and Z are reserved for coordinates")
+
+    zones = []
+    for block in case.iter_blocks(normalized_location):
+        zone_values = _selected_zone_values(
+            block,
+            all_values,
+            None if selection is None else selection.mask,
+        )
+        if zone_values is None:
+            continue
+        zone_name = (
+            f"rank{block.rank:04d}_block{block.block_id:04d}_"
+            f"{block.location}_{block.physics or 'Unknown'}"
+        )
+        zones.append(TecplotZone(zone_name, block.physics or "Unknown", zone_values))
+    if not zones:
+        raise ValidationError("Tecplot selection contains no structured block entities")
+
+    solution_time = 0.0
+    if case.latest_restart:
+        solution_time = float(case.latest_restart[0].time)
+    path = write_tecplot_binary(
+        output_path,
+        title=title,
+        variable_names=tuple(all_values),
+        zones=zones,
+        solution_time=solution_time,
+    )
+    return inspect_tecplot_binary(path)
+
+
 def _assemble_constant(case,name: str) -> tuple[np.ndarray,np.ndarray]:
     gids=np.concatenate([chunk.global_ids[name] for chunk in case.rank_constant_fields]); vals=np.concatenate([chunk.fields[name] for chunk in case.rank_constant_fields])
     order=np.argsort(gids); gids=gids[order]; vals=vals[order]
@@ -157,16 +279,36 @@ def project_cell_values_to_nodes(case, values: np.ndarray, *, valid_mask: np.nda
 
 
 def _block_records(case):
-    cell_index=GlobalIDIndex.build(case.geometry.cell_gid); node_index=GlobalIDIndex.build(case.geometry.node_gid); seen=0
-    for topo in case.rank_topologies:
-        cells={m.block_id:m for m in topo.local_maps if m.location=="cell"}; nodes={m.block_id:m for m in topo.local_maps if m.location=="node"}
-        if set(cells)!=set(nodes): raise ValidationError(f"rank {topo.rank}: Cell/Node block maps differ")
-        for block,cell_map in sorted(cells.items()):
-            node_map=nodes[block]; cell_idx=cell_index.lookup(cell_map.global_ids); node_idx=node_index.lookup(node_map.global_ids); flags=case.geometry.cell_flags[cell_idx]; unique=np.unique(flags)
-            if unique.size!=1: raise ValidationError(f"rank {topo.rank} block {block}: mixed physics flags are not supported in one ordered zone")
-            flag=int(unique[0]); physics=next((name.title() for name,bit in case.manifest.cell_flag_bits.items() if flag&int(bit)),"Unknown")
-            yield topo.rank,block,physics,cell_map.logical_shape,cell_idx,node_map.logical_shape,node_idx
-            seen+=1
+    node_blocks = {
+        (block.rank, block.block_id): block
+        for block in case.iter_blocks(location="node")
+    }
+    seen = 0
+    for cell_block in case.iter_blocks(location="cell"):
+        key = (cell_block.rank, cell_block.block_id)
+        try:
+            node_block = node_blocks[key]
+        except KeyError as exc:
+            raise ValidationError(
+                f"rank {cell_block.rank} block {cell_block.block_id}: missing Node map"
+            ) from exc
+        flags = case.geometry.cell_flags[cell_block.indices]
+        unique = np.unique(flags)
+        if unique.size != 1:
+            raise ValidationError(
+                f"rank {cell_block.rank} block {cell_block.block_id}: mixed physics "
+                "flags are not supported in one ordered zone"
+            )
+        yield (
+            cell_block.rank,
+            cell_block.block_id,
+            cell_block.physics or "Unknown",
+            cell_block.logical_shape,
+            cell_block.indices,
+            node_block.logical_shape,
+            node_block.indices,
+        )
+        seen += 1
     if seen!=case.manifest.number_of_blocks: raise ValidationError(f"local block count {seen} != manifest {case.manifest.number_of_blocks}")
 
 

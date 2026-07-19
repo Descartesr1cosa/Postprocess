@@ -2,6 +2,14 @@
 from __future__ import annotations
 from pathlib import Path
 import numpy as np
+from .access import (
+    Block,
+    DerivedFieldRegistry,
+    EntityView,
+    FieldCollection,
+    SpeciesData,
+    base_location,
+)
 from .assemble import GlobalIDIndex,assemble_dynamic,assemble_geometry,assemble_reconstruction,assemble_topology
 from .constant_field import read_rank_constant_fields
 from .derived import UnitConverter,conserved_to_primitive
@@ -20,6 +28,11 @@ class MPCNSCase:
         self.rank_geometries=geometries; self.rank_topologies=topologies; self.rank_reconstructions=reconstructions; self.rank_constant_fields=constant_fields
         self.geometry=assemble_geometry(geometries); self.topology=assemble_topology(topologies); self.reconstruction=assemble_reconstruction(reconstructions)
         self.unit_converter=UnitConverter(manifest.normalization); self._latest=None; self._dynamic=None
+        self._constant_cache: dict[str, np.ndarray] = {}
+        self._species_cache: dict[str, SpeciesData] = {}
+        self.derived = DerivedFieldRegistry(self)
+        self.fields = FieldCollection(self)
+        self._register_builtin_fields()
 
     @classmethod
     def open(cls,case_directory: str|Path) -> "MPCNSCase":
@@ -32,6 +45,24 @@ class MPCNSCase:
             rs.append(read_rank_reconstruction(d/m.files["reconstruction"][rank],rank=rank,manifest=m))
             cs.append(read_rank_constant_fields(d/m.files["constant_field"][rank],rank=rank,manifest=m))
         return cls(d,m,gs,ts,rs,cs)
+
+    @classmethod
+    def load(
+        cls,
+        case_directory: str | Path,
+        *,
+        data_dir: str | Path | None = None,
+    ) -> "MPCNSCase":
+        """Open static data and assemble the latest restart in one call."""
+        case = cls.open(case_directory)
+        case.load_latest(data_dir=data_dir)
+        return case
+
+    def load_latest(self, *, data_dir: str | Path | None = None) -> "MPCNSCase":
+        """Load and assemble the latest restart, returning this case."""
+        restarts = self.read_latest_restart(data_dir=data_dir)
+        self.assemble_dynamic_fields(restarts)
+        return self
 
     def _data_dir(self,data_dir):
         if data_dir is not None: return Path(data_dir)
@@ -55,7 +86,343 @@ class MPCNSCase:
         """Assemble owner physical cells/faces into global arrays."""
         if restarts is None: restarts=self._latest
         if restarts is None: raise ValidationError("read a restart before dynamic assembly")
-        self._dynamic=assemble_dynamic(restarts,self.rank_topologies,self.geometry,self.manifest); return self._dynamic
+        self._dynamic=assemble_dynamic(restarts,self.rank_topologies,self.geometry,self.manifest)
+        self._species_cache.clear()
+        self.derived.clear_cache()
+        return self._dynamic
+
+    @property
+    def latest_restart(self):
+        """The loaded rank restarts, or ``None`` before :meth:`load_latest`."""
+        return self._latest
+
+    @property
+    def dynamic_fields(self):
+        """Globally assembled restart fields, or ``None`` before loading."""
+        return self._dynamic
+
+    def _require_dynamic(self):
+        if self._dynamic is None:
+            raise ValidationError(
+                "restart fields are not loaded; use MPCNSCase.load(...) or case.load_latest(...)"
+            )
+        return self._dynamic
+
+    def entity(self, location: str) -> EntityView:
+        """Return owner-only global geometry for cells, nodes, faces, or edges."""
+        base = base_location(location)
+        geometry = self.geometry
+        if base == "cell":
+            return EntityView(
+                base,
+                geometry.cell_gid,
+                geometry.cell_center_xyz,
+                geometry.cell_flags,
+                geometry.cell_volume,
+            )
+        if base == "node":
+            return EntityView(base, geometry.node_gid, geometry.node_xyz)
+        if base == "face":
+            return EntityView(
+                base,
+                geometry.face_gid,
+                geometry.face_center_xyz,
+                geometry.face_flags,
+                geometry.face_area,
+                geometry.face_area_vector,
+            )
+        return EntityView(
+            base,
+            geometry.edge_gid,
+            geometry.edge_center_xyz,
+            geometry.edge_flags,
+            geometry.edge_length,
+            connectivity=geometry.edge_node_ids,
+        )
+
+    @property
+    def cells(self) -> EntityView:
+        return self.entity("cell")
+
+    @property
+    def nodes(self) -> EntityView:
+        return self.entity("node")
+
+    @property
+    def faces(self) -> EntityView:
+        return self.entity("face")
+
+    @property
+    def edges(self) -> EntityView:
+        return self.entity("edge")
+
+    def connectivity(self, name: str):
+        """Return a global-ID based CSR topology relation by name."""
+        allowed = {
+            "node_to_cell",
+            "edge_to_cell",
+            "face_to_cell",
+            "cell_to_face",
+        }
+        if name not in allowed:
+            raise KeyError(f"unknown connectivity {name!r}; choose from {sorted(allowed)}")
+        relation = getattr(self.topology, name)
+        if relation is None:
+            raise ValidationError(f"connectivity {name!r} is unavailable")
+        return relation
+
+    @property
+    def block_connections(self) -> dict[int, np.ndarray]:
+        """Return raw inter-block connection tables keyed by rank."""
+        return {
+            topology.rank: topology.block_connections
+            for topology in self.rank_topologies
+        }
+
+    def iter_blocks(self, location: str = "cell"):
+        """Iterate structured maps with canonical indices and orientation data."""
+        requested = location.lower()
+        base = base_location(requested)
+        global_index = GlobalIDIndex.build(self.entity(base).global_ids)
+        cell_global_index = GlobalIDIndex.build(self.geometry.cell_gid)
+        for topology in self.rank_topologies:
+            cell_maps = {
+                mapping.block_id: mapping
+                for mapping in topology.local_maps
+                if mapping.location == "cell"
+            }
+            for mapping in topology.local_maps:
+                matches = (
+                    mapping.location == requested
+                    if requested not in {"face", "edge"}
+                    else mapping.location.startswith(requested + "_")
+                )
+                if not matches:
+                    continue
+                indices = global_index.lookup(mapping.global_ids)
+                physics = None
+                cell_map = cell_maps.get(mapping.block_id)
+                if cell_map is not None:
+                    cell_indices = cell_global_index.lookup(cell_map.global_ids)
+                    flags = np.unique(self.geometry.cell_flags[cell_indices])
+                    if flags.size == 1:
+                        flag = int(flags[0])
+                        physics = next(
+                            (
+                                name.title()
+                                for name, bit in self.manifest.cell_flag_bits.items()
+                                if flag & int(bit)
+                            ),
+                            "Unknown",
+                        )
+                yield Block(
+                    topology.rank,
+                    mapping.block_id,
+                    mapping.location,
+                    mapping.logical_shape,
+                    mapping.global_ids,
+                    indices,
+                    mapping.owner_mask,
+                    mapping.orientation_sign,
+                    physics,
+                )
+
+    def species(self, name: str) -> SpeciesData:
+        """Return raw conserved, primitive, dimensional, and mask access for H/Na."""
+        normalized = name.removesuffix("+")
+        if normalized in self._species_cache:
+            return self._species_cache[normalized]
+        dynamic = self._require_dynamic()
+        field_name = f"U_{normalized}"
+        if field_name not in dynamic.fields:
+            raise KeyError(f"species {name!r} is unavailable")
+        primitive = self.compute_primitive(normalized, dynamic)
+        data = SpeciesData(
+            self,
+            normalized,
+            dynamic.fields[field_name],
+            primitive.density,
+            primitive.velocity,
+            primitive.pressure,
+            dynamic.valid_masks.get(
+                field_name,
+                np.ones(self.geometry.cell_gid.size, dtype=bool),
+            ),
+        )
+        self._species_cache[normalized] = data
+        return data
+
+    @property
+    def H(self) -> SpeciesData:
+        return self.species("H")
+
+    @property
+    def Na(self) -> SpeciesData:
+        return self.species("Na")
+
+    def _register_builtin_fields(self) -> None:
+        for species in ("H", "Na"):
+            self.derived.register(
+                f"{species}_density",
+                lambda case, species=species: case.species(species).density,
+                units="normalized",
+            )
+            self.derived.register(
+                f"{species}_velocity",
+                lambda case, species=species: case.species(species).velocity,
+                units="normalized",
+            )
+            self.derived.register(
+                f"{species}_pressure",
+                lambda case, species=species: case.species(species).pressure,
+                units="normalized",
+            )
+            self.derived.register(
+                f"{species}_number_density_cm3",
+                lambda case, species=species: case.species(species).number_density("cm^-3"),
+                units="cm^-3",
+            )
+            self.derived.register(
+                f"{species}_velocity_km_s",
+                lambda case, species=species: case.species(species).velocity_in("km/s"),
+                units="km/s",
+            )
+            self.derived.register(
+                f"{species}_pressure_nPa",
+                lambda case, species=species: case.species(species).pressure_in("nPa"),
+                units="nPa",
+            )
+            self.derived.register(
+                f"{species}_temperature_K",
+                lambda case, species=species: case.species(species).temperature_kelvin,
+                units="K",
+            )
+
+        def sodium_fraction(case):
+            h = case.H.number_density()
+            na = case.Na.number_density()
+            total = h + na
+            out = np.full(total.shape, np.nan)
+            valid = case.H.valid_mask & case.Na.valid_mask & (total > 0)
+            out[valid] = na[valid] / total[valid]
+            return out
+
+        self.derived.register(
+            "Na_plus_fraction",
+            sodium_fraction,
+            units="1",
+            description="n_Na+ / (n_H+ + n_Na+)",
+        )
+        self.derived.register(
+            "H_Na_drift_velocity",
+            lambda case: case.H.velocity - case.Na.velocity,
+            units="normalized",
+            description="u_H+ - u_Na+",
+        )
+        self.derived.register(
+            "total_ion_pressure",
+            lambda case: case.H.pressure + case.Na.pressure,
+            units="normalized",
+        )
+
+    def register_derived_field(self, name, calculator=None, **metadata):
+        """Register a per-case derived field directly or as a decorator."""
+        overwrite = bool(metadata.get("overwrite", False))
+        if not overwrite and name in self.available_fields:
+            raise ValueError(f"field {name!r} is already available")
+        return self.derived.register(name, calculator, **metadata)
+
+    @property
+    def available_fields(self) -> tuple[str, ...]:
+        dynamic_names = tuple(
+            str(field["name"])
+            for field in self.manifest.existing_dynamic_data.get("fields", [])
+        )
+        constant_names = tuple(str(field["name"]) for field in self.manifest.fields)
+        return tuple(dict.fromkeys((*dynamic_names, *constant_names, *self.derived.definitions)))
+
+    def field_location(self, name: str) -> str:
+        if name in self.derived:
+            return self.derived.location(name)
+        specs = list(self.manifest.existing_dynamic_data.get("fields", [])) + list(
+            self.manifest.fields
+        )
+        for spec in specs:
+            if spec["name"] == name:
+                return base_location(str(spec["location"]))
+        raise KeyError(f"unknown field {name!r}")
+
+    def _assemble_constant_field(self, name: str) -> np.ndarray:
+        if name in self._constant_cache:
+            return self._constant_cache[name]
+        location = self.field_location(name)
+        target = self.entity(location).global_ids
+        index = GlobalIDIndex.build(target)
+        chunks = [chunk for chunk in self.rank_constant_fields if name in chunk.fields]
+        if not chunks:
+            raise KeyError(f"constant field {name!r} is unavailable")
+        values = np.concatenate([np.asarray(chunk.fields[name]) for chunk in chunks])
+        global_ids = np.concatenate([chunk.global_ids[name] for chunk in chunks])
+        if np.unique(global_ids).size != global_ids.size:
+            raise ValidationError(f"duplicate constant-field owner IDs for {name}")
+        shape = (target.size,) + values.shape[1:]
+        assembled = np.full(shape, np.nan, dtype=np.float64)
+        assembled[index.lookup(global_ids)] = values
+        self._constant_cache[name] = assembled
+        return assembled
+
+    def get_field(self, name: str) -> np.ndarray:
+        """Resolve one raw restart, static constant, or registered derived field."""
+        if name in self.derived:
+            return self.derived.evaluate(name)
+        dynamic_names = {
+            str(field["name"])
+            for field in self.manifest.existing_dynamic_data.get("fields", [])
+        }
+        if name in dynamic_names:
+            return self._require_dynamic().fields[name]
+        if any(field["name"] == name for field in self.manifest.fields):
+            return self._assemble_constant_field(name)
+        raise KeyError(f"unknown field {name!r}")
+
+    def field_global_ids(self, name: str) -> np.ndarray:
+        """Return the exact global-ID ordering used by a public field."""
+        if self._dynamic is not None and name in self._dynamic.global_ids:
+            return self._dynamic.global_ids[name]
+        return self.entity(self.field_location(name)).global_ids
+
+    def valid_mask(self, name: str) -> np.ndarray:
+        """Return the applicability/finite-row mask for any public field."""
+        if self._dynamic is not None and name in self._dynamic.valid_masks:
+            return self._dynamic.valid_masks[name]
+        values = self.get_field(name)
+        axes = tuple(range(1, values.ndim))
+        return np.all(np.isfinite(values), axis=axes) if axes else np.isfinite(values)
+
+    def select_plane(self, **kwargs):
+        from .selection import select_plane
+
+        return select_plane(self, **kwargs)
+
+    def select_box(self, *args, **kwargs):
+        from .selection import select_box
+
+        return select_box(self, *args, **kwargs)
+
+    def select_sphere(self, **kwargs):
+        from .selection import select_sphere
+
+        return select_sphere(self, **kwargs)
+
+    def select_boundary_faces(self, **kwargs):
+        from .surface import select_boundary_faces
+
+        return select_boundary_faces(self, **kwargs)
+
+    def species_flux(self, species: str, surface, **kwargs):
+        from .surface import integrate_species_flux
+
+        return integrate_species_flux(self, surface, species=species, **kwargs)
 
     def reconstruct_B_cell(self,fields=None):
         """Add dynamic face fields and reconstruct global Cartesian cell B."""

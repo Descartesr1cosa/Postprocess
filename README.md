@@ -37,6 +37,10 @@ python -m mpcns_post.cli export-tecplot /path/to/DATA_bin \
   --data-dir /path/to/DATA \
   --output-dir /path/to/post_output \
   --prefix mercury
+python -m mpcns_post.cli export-fields /path/to/DATA_bin \
+  Na_plus_fraction H_Na_drift_velocity \
+  --data-dir /path/to/DATA \
+  --output /path/to/post_output/custom.plt
 ```
 
 ## Runnable Python examples
@@ -102,15 +106,125 @@ and `Photo_rate`; dynamic fields are `U_H`, `U_Na`, `B_xi`, `B_eta`, and
 
 ## Python API
 
-```python
-from mpcns_post import MPCNSCase
+Open and assemble a complete case in one call. The older `open()`,
+`read_latest_restart()`, and `assemble_dynamic_fields()` calls remain available
+for applications that need explicit lifecycle control.
 
+```python
+from mpcns_post import MPCNSCase, export_fields_tecplot
+
+case = MPCNSCase.load(
+    "/path/to/DATA_bin",
+    data_dir="/path/to/DATA",
+)
+
+# Owner-only, global-ID ordered entity data.
+cell_xyz = case.cells.coordinates
+cell_gid = case.cells.global_ids
+face_area_vector = case.faces.area_vectors
+face_to_cell = case.connectivity("face_to_cell")
+block_connections = case.block_connections
+
+# Raw conserved arrays, validity masks, primitives, and dimensional values.
+u_na = case.fields["U_Na"]
+fluid_mask = case.valid_mask("U_Na")
+na = case.Na
+na_number_cm3 = na.number_density("cm^-3")
+na_velocity_km_s = na.velocity_in("km/s")
+na_pressure_npa = na.pressure_in("nPa")
+na_temperature = na.temperature_kelvin
+
+# Block maps expose global indices, owner/orientation metadata, and reshaping.
+for block in case.iter_blocks(location="cell"):
+    block_pressure = block.reshape(case.fields["total_ion_pressure"])
+
+# Every selection carries sparse indices plus full mask, coordinates, and IDs.
+plane = case.select_plane(axis="y", value=0.0, tolerance=1.0e-8)
+box = case.select_box(lower=(-2, -1, -1), upper=(2, 1, 1))
+shell = case.select_sphere(radius=3.0, inner_radius=2.5)
+```
+
+### Registered derived fields
+
+Derived fields are lazy, cached, and local to a case. Calculators receive the
+case and return a global array whose leading dimension matches their declared
+location. Built-ins include `Na_plus_fraction`, `H_Na_drift_velocity`, and
+`total_ion_pressure`.
+
+```python
+import numpy as np
+
+@case.register_derived_field(
+    "ion_bulk_speed",
+    location="cell",
+    units="km/s",
+)
+def ion_bulk_speed(case):
+    velocity = 0.5 * (case.H.velocity + case.Na.velocity)
+    return np.linalg.norm(
+        case.unit_converter.convert(velocity, "velocity", "km/s"),
+        axis=1,
+    )
+
+speed = case.fields["ion_bulk_speed"]
+
+export_fields_tecplot(
+    case,
+    {
+        "Na_fraction": case.fields["Na_plus_fraction"],
+        "ion_bulk_speed_km_s": speed,
+        "H_Na_drift": case.fields["H_Na_drift_velocity"],
+    },
+    "/path/to/post_output/mercury_y0.plt",
+    location="cell",
+    selection=plane,
+)
+```
+
+Axis-aligned plane/box subsets remain structured Tecplot sub-zones. Spherical
+and oblique subsets remain separated by source block and are represented as
+ordered point-strip zones. Vector fields are expanded to `_x`, `_y`, `_z`.
+
+### Owner-only surface and escape flux
+
+Boundary surfaces contain each global exterior Face exactly once. Outward area
+vectors use the stored `cell_to_face` orientation sign and a geometric outward
+check. The interpolation policy is explicit; exterior flux currently supports
+only `owner`, so no ghost or MPI alias can be counted twice.
+
+```python
+# Select a geometrically defined part of the exterior boundary.
+face_shell = case.select_sphere(
+    center=(0, 0, 0),
+    radius=4.0,
+    inner_radius=3.9,
+    location="face",
+)
+surface = case.select_boundary_faces(selection=face_shell)
+
+# Positive total means net outward escape. Units are particles/s.
+escape = case.species_flux(
+    "Na",
+    surface,
+    kind="particle",
+    dimensional=True,
+    interpolation="owner",
+)
+print(escape.total, escape.units)
+```
+
+For a custom cell density/velocity pair, call `integrate_surface_flux`
+directly. `kind="mass"` returns kg/s when `dimensional=True`.
+
+The original explicit workflow remains valid:
+
+```python
 case = MPCNSCase.open("/path/to/DATA_bin")
 restart = case.read_latest_restart(data_dir="/path/to/DATA")
 fields = case.assemble_dynamic_fields(restart)
+
 B_cell = case.reconstruct_B_cell(fields)
 H = case.compute_primitive("H", fields)
-print(case.summary(data_dir="/path/to/DATA"))
 ```
 
 ## Known limitations
@@ -119,14 +233,19 @@ Version 1 and little-endian float64/int64 data are supported. Each rank file is
 the latest overwritten checkpoint, not a time-series archive. Regional
 constant-B diagnostics for axis-touching and near-axis-shell cells are reported
 as unavailable because the current v1 cell flags do not encode those regions.
-No visualization, trajectory integration, magnetic field-line tracing, or MPI
-Python execution is included in this stage.
+No interactive visualization, trajectory integration, magnetic field-line
+tracing, or MPI Python execution is included in this stage.
 
 The current bundled five-rank sample passes the complete validator. Its 54,150
 Solid cells intentionally have inactive fluid species state, while all 216,600
 Fluid cells are populated.
 
 ## Tecplot binary export
+
+`export_fields_tecplot` is the general API for arbitrary cell/node/face/edge
+arrays and spatial selections. The older `export_case_tecplot` and
+`export-tecplot` CLI remain convenience workflows that construct the standard
+Mercury fluid and electromagnetic output set described below.
 
 `export-tecplot` is case-independent and writes Tecplot 112 binary ordered-zone
 files without requiring Tecplot, PyTecplot, or MPI. Every rank-local structured

@@ -207,6 +207,7 @@ class GlobalTopology:
     node_to_cell: CSRConnectivity
     edge_to_cell: CSRConnectivity
     face_to_cell: CSRConnectivity
+    cell_to_face: CSRConnectivity | None = None
 
 
 @dataclass

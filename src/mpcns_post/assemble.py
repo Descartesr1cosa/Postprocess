@@ -56,9 +56,53 @@ def _merge_reverse(topologies: list[RankTopology], attr: str) -> CSRConnectivity
     return CSRConnectivity(np.asarray(off,dtype=np.int64),np.asarray(vals,dtype=np.int64),row_global_ids=keys)
 
 
+def _merge_signed_rows(topologies: list[RankTopology], attr: str) -> CSRConnectivity:
+    """Merge a global-ID keyed signed relation, rejecting sign conflicts."""
+    rows: dict[int, dict[int, int]] = {}
+    for topology in topologies:
+        relation = getattr(topology, attr)
+        assert relation.row_global_ids is not None
+        assert relation.signs is not None
+        for row_index, row_gid in enumerate(relation.row_global_ids):
+            start, stop = relation.offsets[row_index:row_index + 2]
+            row = rows.setdefault(int(row_gid), {})
+            for entity_gid, sign in zip(
+                relation.indices[start:stop],
+                relation.signs[start:stop],
+            ):
+                previous = row.setdefault(int(entity_gid), int(sign))
+                if previous != int(sign):
+                    raise ValidationError(
+                        f"conflicting {attr} orientation for row {int(row_gid)}, "
+                        f"entity {int(entity_gid)}"
+                    )
+
+    row_gids = np.asarray(sorted(rows), dtype=np.int64)
+    offsets = [0]
+    indices: list[int] = []
+    signs: list[int] = []
+    for row_gid in row_gids:
+        for entity_gid, sign in sorted(rows[int(row_gid)].items()):
+            indices.append(entity_gid)
+            signs.append(sign)
+        offsets.append(len(indices))
+    return CSRConnectivity(
+        np.asarray(offsets, dtype=np.int64),
+        np.asarray(indices, dtype=np.int64),
+        np.asarray(signs, dtype=np.int32),
+        row_global_ids=row_gids,
+    )
+
+
 def assemble_topology(chunks: list[RankTopology]) -> GlobalTopology:
     """Collect local maps and diagnostic reverse incidence relations."""
-    return GlobalTopology([m for t in chunks for m in t.local_maps],_merge_reverse(chunks,"node_to_cell"),_merge_reverse(chunks,"edge_to_cell"),_merge_reverse(chunks,"face_to_cell"))
+    return GlobalTopology(
+        [m for t in chunks for m in t.local_maps],
+        _merge_reverse(chunks,"node_to_cell"),
+        _merge_reverse(chunks,"edge_to_cell"),
+        _merge_reverse(chunks,"face_to_cell"),
+        _merge_signed_rows(chunks,"cell_to_face"),
+    )
 
 
 def _merge_operator(chunks, attr, vector):

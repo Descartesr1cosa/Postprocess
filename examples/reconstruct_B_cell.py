@@ -16,10 +16,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--data-dir", type=Path)
     args = parser.parse_args(argv)
 
-    case = MPCNSCase.open(args.case_directory)
-    restart = case.read_latest_restart(data_dir=args.data_dir)
-    fields = case.assemble_dynamic_fields(restart)
-    b_cell = case.reconstruct_B_cell(fields)
+    case = MPCNSCase.load(args.case_directory, data_dir=args.data_dir)
+    b_cell = case.reconstruct_B_cell(case.dynamic_fields)
     magnitude = np.linalg.norm(b_cell, axis=1)
 
     print(f"B_cell shape: {b_cell.shape}")

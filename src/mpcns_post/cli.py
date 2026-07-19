@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .case import MPCNSCase
 from .manifest import load_manifest
-from .tecplot import export_case_tecplot
+from .tecplot import export_case_tecplot, export_fields_tecplot
 
 
 def _print_report(report) -> int:
@@ -97,6 +97,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export_parser.add_argument("--illuminated-frequency", type=float, default=5.0e-5)
     export_parser.add_argument("--shadow-frequency", type=float, default=1.0e-5)
+
+    fields_parser = subparsers.add_parser(
+        "export-fields",
+        help="export named raw/derived fields through the general Tecplot API",
+    )
+    _add_case_directory(fields_parser)
+    _add_data_directory(fields_parser)
+    fields_parser.add_argument("fields", nargs="+", help="public case field names")
+    fields_parser.add_argument("--output", type=Path, required=True)
+    fields_parser.add_argument(
+        "--location",
+        choices=("cell", "node", "face", "edge"),
+        default="cell",
+    )
     return parser
 
 
@@ -173,6 +187,17 @@ def main(argv: list[str] | None = None) -> int:
         return status
     if args.command == "export-tecplot":
         return _export_tecplot(case, args)
+    if args.command == "export-fields":
+        case.load_latest(data_dir=args.data_dir)
+        fields = {name: case.get_field(name) for name in args.fields}
+        info = export_fields_tecplot(
+            case,
+            fields,
+            args.output,
+            location=args.location,
+        )
+        print(f"{info.path}: {len(info.zones)} zones, {len(info.variables)} variables")
+        return 0
     raise AssertionError(f"unhandled command: {args.command}")
 
 
