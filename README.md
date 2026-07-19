@@ -31,12 +31,32 @@ face semantics.
 python -m mpcns_post.cli inspect-manifest /path/to/DATA_bin
 python -m mpcns_post.cli validate-static /path/to/DATA_bin
 python -m mpcns_post.cli validate-case /path/to/DATA_bin --data-dir /path/to/DATA
+python -m mpcns_post.cli diagnose /path/to/DATA_bin --data-dir /path/to/DATA
 python -m mpcns_post.cli summary /path/to/DATA_bin --data-dir /path/to/DATA
 python -m mpcns_post.cli export-tecplot /path/to/DATA_bin \
   --data-dir /path/to/DATA \
   --output-dir /path/to/post_output \
   --prefix mercury
 ```
+
+## Runnable Python examples
+
+Inspection and validation are collected in one diagnostics script. Tecplot
+export is also available as a standalone Python workflow, in addition to the
+CLI command above.
+
+```bash
+python examples/case_diagnostics.py /path/to/DATA_bin \
+  --data-dir /path/to/DATA
+
+python examples/export_tecplot.py /path/to/DATA_bin \
+  --data-dir /path/to/DATA \
+  --output-dir /path/to/post_output \
+  --prefix mercury
+```
+
+See [`examples/README.md`](examples/README.md) for the focused reconstruction
+example and the complete example layout.
 
 ## Confirmed version-1 layouts
 
@@ -138,4 +158,4 @@ frequencies; different cases can override them with
 cell-centered curvilinear numerical curl of induced B, normalized by the
 manifest `current_density_ref`; it is not the solver's unavailable mimetic
 J-edge reconstruction. Each output is immediately read back to exact EOF, and
-an `<prefix>_export_summary.json` is written beside the PLT files.
+an `<prefix>_export_summary_<location>.json` is written beside the PLT files.

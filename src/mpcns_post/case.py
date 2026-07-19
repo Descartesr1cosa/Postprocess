@@ -117,14 +117,20 @@ class MPCNSCase:
         except Exception as exc: report.add("error","restart",str(exc))
         return report
 
-    def summary(self, *, data_dir: str|Path|None=None) -> str:
-        """Return a concise human-readable case summary."""
+    def summary(
+        self,
+        *,
+        data_dir: str | Path | None = None,
+        include_restart: bool = True,
+    ) -> str:
+        """Return a concise human-readable static or complete case summary."""
         g=self.geometry; lines=[f"case UUID: {self.manifest.case_uuid}",f"mesh UUID: {self.manifest.mesh_uuid}",f"ranks: {self.manifest.number_of_ranks}",f"blocks: {self.manifest.number_of_blocks}",f"global entities: nodes={g.node_gid.size}, edges={g.edge_gid.size}, faces={g.face_gid.size}, cells={g.cell_gid.size}",f"edge adjacency: {adjacency_histogram(self.topology.edge_to_cell)}"]
-        try:
-            rr=self._latest or self.read_latest_restart(data_dir=data_dir); f=self._dynamic or self.assemble_dynamic_fields(rr)
-            lines.append(f"latest step/time: {rr[0].step} / {rr[0].time:.17g}")
-            for name,a in f.fields.items(): st=finite_statistics(a); lines.append(f"{name}: min={st['min']:.6g}, max={st['max']:.6g}")
-        except Exception as exc: lines.append(f"latest restart: unavailable ({exc})")
+        if include_restart:
+            try:
+                rr=self._latest or self.read_latest_restart(data_dir=data_dir); f=self._dynamic or self.assemble_dynamic_fields(rr)
+                lines.append(f"latest step/time: {rr[0].step} / {rr[0].time:.17g}")
+                for name,a in f.fields.items(): st=finite_statistics(a); lines.append(f"{name}: min={st['min']:.6g}, max={st['max']:.6g}")
+            except Exception as exc: lines.append(f"latest restart: unavailable ({exc})")
         try:
             rb=validate_constant_B_reproduction(g,self.reconstruction); lines.append(f"constant-B max error: {rb.max_absolute_error:.3e}")
         except Exception as exc: lines.append(f"constant-B validation: unavailable ({exc})")
