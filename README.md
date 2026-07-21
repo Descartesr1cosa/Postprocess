@@ -45,11 +45,11 @@ python -m mpcns_post.cli export-fields /path/to/DATA_bin \
 
 ## Runnable Python examples
 
-The examples are deliberately limited to one DEC test and the complete Node
-species/electromagnetic exporter.
+The examples are deliberately limited to the unchanged supplied Node exporter
+and one combined DATA/DEC validation script.
 
 ```bash
-python examples/dec_current.py /path/to/DATA_bin \
+python examples/validate_case_dec.py /path/to/DATA_bin \
   --data-dir /path/to/DATA --validate-debug
 
 # Edit its settings block first.

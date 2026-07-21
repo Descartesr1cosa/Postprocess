@@ -12,8 +12,7 @@ Important
 - All physical calculations are first performed on global Cell arrays.
 - The stored cell_scalar_to_node reconstruction is then used component-wise.
 - Only Fluid blocks are written.
-- The current density uses the solver-equivalent DEC operators saved in the
-  expanded DATA_bin and needs only induced B from the restart.
+- The current density uses the solver-equivalent DEC API and induced B only.
 - The ambipolar electric field needs an electron-pressure closure. Edit
   ELECTRON_PRESSURE_MODEL below to match the physical model.
 """
@@ -146,9 +145,8 @@ def compute_current_cell(case, B_induced_cell_nd):
     J_A_m2 : ndarray, shape (Ncell, 3)
     """
 
-    # B_induced_cell_nd is retained in this helper's signature so existing
-    # callers need no change.  DEC acts on the original restart Face 2-form,
-    # including the exact physical/interface ghost storage, not on B_cell.
+    # Keep the existing helper signature and the rest of the export workflow
+    # unchanged. DEC acts on the original restart Face 2-form, not B_cell.
     _ = B_induced_cell_nd
     return case.compute_current_dec(unit="A/m^2")
 
