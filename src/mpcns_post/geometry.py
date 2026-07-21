@@ -13,7 +13,15 @@ def read_rank_geometry(path: str | Path, *, rank: int, manifest: Manifest) -> Ra
     """Read and validate one owner-only geometry chunk."""
     s=read_static_file(path,expected_type="geometry",manifest=manifest).sections
     missing=set(NAMES)-s.keys()
-    if missing or set(s)-set(NAMES): raise ValidationError(f"{path}: geometry section mismatch; missing={sorted(missing)}, extra={sorted(set(s)-set(NAMES))}")
+    # v3 adds Bghost_* geometry for diagnostics.  Core owner geometry remains
+    # byte-for-byte compatible with v1 and is intentionally all we retain here.
+    allowed_extra = {
+        "Bghost_global_id", "Bghost_address", "Bghost_center_xyz",
+        "Bghost_area_vector", "Bghost_area", "Bghost_flags",
+    }
+    extra = set(s) - set(NAMES)
+    if missing or extra - allowed_extra:
+        raise ValidationError(f"{path}: geometry section mismatch; missing={sorted(missing)}, extra={sorted(extra)}")
     v=lambda n:s[n].values
     g=RankGeometry(rank,v("node_global_id"),v("node_xyz"),v("edge_global_id"),v("edge_node_ids"),v("edge_center_xyz"),v("edge_directed_dr"),v("edge_length"),v("edge_flags"),v("face_global_id"),v("face_center_xyz"),v("face_area_vector"),v("face_area"),v("face_flags"),v("cell_global_id"),v("cell_center_xyz"),v("cell_volume"),v("cell_flags"))
     groups=((g.node_gid,g.node_xyz,"node"),(g.edge_gid,g.edge_center_xyz,"edge"),(g.face_gid,g.face_center_xyz,"face"),(g.cell_gid,g.cell_center_xyz,"cell"))
@@ -28,4 +36,3 @@ def read_rank_geometry(path: str | Path, *, rank: int, manifest: Manifest) -> Ra
     if np.any((g.face_area<=0)|~np.isclose(fcalc,g.face_area,rtol=1e-10,atol=1e-13)): raise ValidationError(f"{path}: face area/vector mismatch")
     if np.any(~np.isfinite(g.cell_volume)) or np.any(g.cell_volume<=0): raise ValidationError(f"{path}: invalid cell volume")
     return g
-

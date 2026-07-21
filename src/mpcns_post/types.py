@@ -49,6 +49,9 @@ class Manifest:
     fields: tuple[Mapping[str, object], ...]
     block_physics_codes: Mapping[str, str] = field(default_factory=dict)
     cell_flag_bits: Mapping[str, int] = field(default_factory=dict)
+    Bface_operator_column_space: Mapping[str, object] = field(default_factory=dict)
+    dec_current_semantics: Mapping[str, object] = field(default_factory=dict)
+    Bstore_flag_bits: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -133,6 +136,7 @@ class RankTopology:
     face_to_cell: CSRConnectivity
     local_maps: list[LocalEntityMap]
     block_connections: Int64Array
+    B_face_storage: FaceStorageTopology | None = None
 
 
 @dataclass
@@ -176,12 +180,49 @@ class ScalarReconstructionOperator:
     input_global_ids: Int64Array
     weights: FloatArray
 
+    def apply(self, input_values: FloatArray, input_gid_to_index: object | None = None) -> FloatArray:
+        """Apply a scalar CSR operator to global-ID keyed input values."""
+        values = np.asarray(input_values, dtype=np.float64)
+        if input_gid_to_index is None:
+            mapped = self.input_global_ids
+        elif isinstance(input_gid_to_index, dict):
+            mapped = np.fromiter(
+                (input_gid_to_index[int(g)] for g in self.input_global_ids),
+                dtype=np.int64,
+                count=self.input_global_ids.size,
+            )
+        elif hasattr(input_gid_to_index, "lookup"):
+            mapped = input_gid_to_index.lookup(self.input_global_ids)
+        else:
+            mapped = np.asarray(input_gid_to_index)[self.input_global_ids]
+        output = np.zeros(self.offsets.size - 1, dtype=np.float64)
+        for row in range(output.size):
+            start, stop = self.offsets[row:row + 2]
+            output[row] = np.dot(self.weights[start:stop], values[mapped[start:stop]])
+        return output
+
+
+@dataclass
+class FaceStorageTopology:
+    """Rank-local catalog of quotient and restart-ghost B-face columns."""
+
+    quotient_count: int
+    global_column_count: int
+    global_ids: Int64Array
+    quotient_ids: Int64Array
+    addresses: Int64Array
+    orientation_sign: Int32Array
+    owner_mask: np.ndarray
+    flags: UInt32Array
+
 
 @dataclass
 class RankReconstruction:
     rank: int
     B_face_to_cell: VectorReconstructionOperator
     cell_scalar_to_node: ScalarReconstructionOperator
+    B_face_to_J_edge: ScalarReconstructionOperator | None = None
+    J_edge_to_cell: VectorReconstructionOperator | None = None
 
 
 @dataclass
@@ -214,6 +255,8 @@ class GlobalTopology:
 class GlobalReconstruction:
     B_face_to_cell: VectorReconstructionOperator
     cell_scalar_to_node: ScalarReconstructionOperator
+    B_face_to_J_edge: ScalarReconstructionOperator | None = None
+    J_edge_to_cell: VectorReconstructionOperator | None = None
 
 
 @dataclass

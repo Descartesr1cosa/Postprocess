@@ -336,12 +336,20 @@ def export_case_tecplot(case, *, data_dir: str|Path|None=None, output_dir: str|P
     t_na=species_temperature_kelvin(na.density,na.pressure,density_ref=case.manifest.normalization["density_ref"],pressure_ref=case.manifest.normalization["pressure_ref"],particle_mass=case.manifest.physical_constants["particle_mass_Na"])
     fluid_global={"X_RM":case.geometry.cell_center_xyz[:,0],"Y_RM":case.geometry.cell_center_xyz[:,1],"Z_RM":case.geometry.cell_center_xyz[:,2],"Na_neutral_cm-3":neutral,"Hplus_n_cm-3":n_h,"Hplus_Ux_km-s":units.convert(h.velocity[:,0],"velocity","km/s"),"Hplus_Uy_km-s":units.convert(h.velocity[:,1],"velocity","km/s"),"Hplus_Uz_km-s":units.convert(h.velocity[:,2],"velocity","km/s"),"Hplus_p_nPa":units.convert(h.pressure,"pressure","nPa"),"Hplus_T_K":t_h,"Naplus_n_cm-3":n_na,"Naplus_Ux_km-s":units.convert(na.velocity[:,0],"velocity","km/s"),"Naplus_Uy_km-s":units.convert(na.velocity[:,1],"velocity","km/s"),"Naplus_Uz_km-s":units.convert(na.velocity[:,2],"velocity","km/s"),"Naplus_p_nPa":units.convert(na.pressure,"pressure","nPa"),"Naplus_T_K":t_na}
     em_global={"X_RM":case.geometry.cell_center_xyz[:,0],"Y_RM":case.geometry.cell_center_xyz[:,1],"Z_RM":case.geometry.cell_center_xyz[:,2],"B_total_x_nT":units.convert(b_total[:,0],"magnetic_field","nT"),"B_total_y_nT":units.convert(b_total[:,1],"magnetic_field","nT"),"B_total_z_nT":units.convert(b_total[:,2],"magnetic_field","nT")}
-    blocks=list(_block_records(case)); current_global=np.full_like(b_ind,np.nan); current_ranges=[]
-    for rank,block,physics,cell_shape,cell_idx,node_shape,node_idx in blocks:
-        reshape_cell=lambda a:np.asarray(a[cell_idx]).reshape(cell_shape,order="F")
-        coords=np.stack([reshape_cell(case.geometry.cell_center_xyz[:,c]) for c in range(3)],axis=-1); bind=np.stack([reshape_cell(b_ind[:,c]) for c in range(3)],axis=-1)
-        curl=curvilinear_curl(coords,bind); current=units.convert(curl,"current_density","nA/m^2"); current_ranges.append((float(current.min()),float(current.max())))
-        current_global[cell_idx]=current.reshape((-1,3),order="F")
+    blocks=list(_block_records(case)); current_global=np.full_like(b_ind,np.nan)
+    if case.reconstruction.B_face_to_J_edge is not None:
+        current_global = case.compute_current_dec(unit="nA/m^2")
+        current_method = "solver-equivalent DEC: Jedge=M1^-1 D1^T M2 Bind, then Jedge-to-cell"
+    else:
+        # Retain v1 export compatibility for static data that predates the DEC
+        # operators.  New v3 output always takes the branch above.
+        for rank,block,physics,cell_shape,cell_idx,node_shape,node_idx in blocks:
+            reshape_cell=lambda a:np.asarray(a[cell_idx]).reshape(cell_shape,order="F")
+            coords=np.stack([reshape_cell(case.geometry.cell_center_xyz[:,c]) for c in range(3)],axis=-1); bind=np.stack([reshape_cell(b_ind[:,c]) for c in range(3)],axis=-1)
+            curl=curvilinear_curl(coords,bind); current=units.convert(curl,"current_density","nA/m^2")
+            current_global[cell_idx]=current.reshape((-1,3),order="F")
+        current_method = "legacy v1 fallback: cell-centered curvilinear curl of induced B"
+    current_range = [float(np.min(current_global)), float(np.max(current_global))]
     em_global.update({"J_induced_x_nA-m2":current_global[:,0],"J_induced_y_nA-m2":current_global[:,1],"J_induced_z_nA-m2":current_global[:,2],"PhysicsCode":case.geometry.cell_flags.astype(np.float64)})
     if np.any(~np.isfinite(current_global)): raise ValidationError("current-density assembly left unfilled Cells")
     if location=="node":
@@ -368,6 +376,6 @@ def export_case_tecplot(case, *, data_dir: str|Path|None=None, output_dir: str|P
     fluid_info=inspect_tecplot_binary(fluid_path); em_info=inspect_tecplot_binary(em_path)
     def zone_ranges(zones,names):
         return {name:[float(min(np.min(z.values[name]) for z in zones)),float(max(np.max(z.values[name]) for z in zones))] for name in names}
-    summary={"case_uuid":case.manifest.case_uuid,"mesh_uuid":case.manifest.mesh_uuid,"step":restarts[0].step,"time":restarts[0].time,"location":location,"files":{"fluid":{"path":str(fluid_path),"bytes":fluid_path.stat().st_size,"zones":len(fluid_info.zones),"variables":list(fluid_info.variables),"ranges":zone_ranges(fluid_zones,fluid_info.variables)},"electromagnetic":{"path":str(em_path),"bytes":em_path.stat().st_size,"zones":len(em_info.zones),"variables":list(em_info.variables),"ranges":zone_ranges(em_zones,em_info.variables)}},"neutral_sodium_method":f"Photo_rate / nu; illuminated nu={illuminated_frequency:.17g} s^-1, shadow nu={shadow_frequency:.17g} s^-1","current_method":"cell-centered curvilinear curl of induced B; normalized with manifest current_density_ref","current_nA_m2_range":[min(x[0] for x in current_ranges),max(x[1] for x in current_ranges)]}
+    summary={"case_uuid":case.manifest.case_uuid,"mesh_uuid":case.manifest.mesh_uuid,"step":restarts[0].step,"time":restarts[0].time,"location":location,"files":{"fluid":{"path":str(fluid_path),"bytes":fluid_path.stat().st_size,"zones":len(fluid_info.zones),"variables":list(fluid_info.variables),"ranges":zone_ranges(fluid_zones,fluid_info.variables)},"electromagnetic":{"path":str(em_path),"bytes":em_path.stat().st_size,"zones":len(em_info.zones),"variables":list(em_info.variables),"ranges":zone_ranges(em_zones,em_info.variables)}},"neutral_sodium_method":f"Photo_rate / nu; illuminated nu={illuminated_frequency:.17g} s^-1, shadow nu={shadow_frequency:.17g} s^-1","current_method":current_method,"current_nA_m2_range":current_range}
     (output/f"{prefix}_export_summary_{location}.json").write_text(json.dumps(summary,indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
     return summary

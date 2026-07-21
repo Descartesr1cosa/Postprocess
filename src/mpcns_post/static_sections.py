@@ -30,7 +30,9 @@ def read_static_file(path: str | Path, *, expected_type: str, manifest: Manifest
     version=r.read_uint32(); file_type=r.read_uint32(); header_bytes=r.read_uint64(); payload_bytes=r.read_uint64()
     cu=_uuid(r.read_uint64(),r.read_uint64()); mu=_uuid(r.read_uint64(),r.read_uint64())
     endian=r.read_uint32(); float_bytes=r.read_uint32(); index_bytes=r.read_uint32(); reserved=r.read_uint32()
-    if version != manifest.format_version or file_type != FILE_TYPES[expected_type]: raise BinaryFormatError(f"{r.path}: static type/version mismatch")
+    # The generic MPCNSBIN container remains version 1; manifest v3 describes
+    # the expanded section schema and is intentionally not the container version.
+    if version != 1 or file_type != FILE_TYPES[expected_type]: raise BinaryFormatError(f"{r.path}: static type/version mismatch")
     if header_bytes != 80 or payload_bytes != r.remaining_bytes(): raise BinaryFormatError(f"{r.path}: header/payload byte count mismatch")
     if cu != manifest.case_uuid or mu != manifest.mesh_uuid: raise BinaryFormatError(f"{r.path}: UUID mismatch")
     if (endian,float_bytes,index_bytes,reserved)!=(1,8,8,0): raise BinaryFormatError(f"{r.path}: unsupported scalar/header flags")

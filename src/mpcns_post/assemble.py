@@ -105,7 +105,7 @@ def assemble_topology(chunks: list[RankTopology]) -> GlobalTopology:
     )
 
 
-def _merge_operator(chunks, attr, vector):
+def _merge_operator(chunks, attr, vector, name):
     grouped={}
     for r in chunks:
         op=getattr(r,attr)
@@ -119,12 +119,22 @@ def _merge_operator(chunks, attr, vector):
     if weights: w=np.concatenate(weights,axis=0)
     else: w=np.empty((0,3),dtype=np.float64) if vector else np.empty(0,dtype=np.float64)
     cls=VectorReconstructionOperator if vector else ScalarReconstructionOperator
-    return cls("B_face_to_cell_cartesian" if vector else "cell_scalar_to_node",outs,np.asarray(offsets,dtype=np.int64),inp,w)
+    return cls(name,outs,np.asarray(offsets,dtype=np.int64),inp,w)
 
 
 def assemble_reconstruction(chunks: list[RankReconstruction]) -> GlobalReconstruction:
-    """Merge owner-cell rows and distributed node rows by output global ID."""
-    return GlobalReconstruction(_merge_operator(chunks,"B_face_to_cell",True),_merge_operator(chunks,"cell_scalar_to_node",False))
+    """Merge owner rows for the legacy and optional DEC operators."""
+    has_dec = [r.B_face_to_J_edge is not None and r.J_edge_to_cell is not None for r in chunks]
+    if any(has_dec) and not all(has_dec):
+        raise ValidationError("DEC reconstruction operators are missing on some ranks")
+    b_to_j = _merge_operator(chunks,"B_face_to_J_edge",False,"B_face_to_J_edge") if all(has_dec) else None
+    j_to_cell = _merge_operator(chunks,"J_edge_to_cell",True,"J_edge_to_cell_cartesian") if all(has_dec) else None
+    return GlobalReconstruction(
+        _merge_operator(chunks,"B_face_to_cell",True,"B_face_to_cell_cartesian"),
+        _merge_operator(chunks,"cell_scalar_to_node",False,"cell_scalar_to_node"),
+        b_to_j,
+        j_to_cell,
+    )
 
 
 def assemble_dynamic(restarts: list[RankRestart], topologies: list[RankTopology], geometry: GlobalGeometry, manifest=None) -> GlobalFields:
@@ -136,21 +146,37 @@ def assemble_dynamic(restarts: list[RankRestart], topologies: list[RankTopology]
     # from the topology maps. This remains an ID-based operation (no coordinate
     # matching or topology inference).
     face_gids=np.unique(np.concatenate([m.global_ids for t in topologies for m in t.local_maps if m.location.startswith("face_")]))
-    target={"U_H":geometry.cell_gid,"U_Na":geometry.cell_gid,"B_xi":face_gids,"B_eta":face_gids,"B_zeta":face_gids}
+    edge_gids=np.unique(np.concatenate([m.global_ids for t in topologies for m in t.local_maps if m.location.startswith("edge_")]))
+    supported = {
+        "U_H": (geometry.cell_gid, "cell"),
+        "U_Na": (geometry.cell_gid, "cell"),
+        "B_xi": (face_gids, "face_xi"),
+        "B_eta": (face_gids, "face_eta"),
+        "B_zeta": (face_gids, "face_zeta"),
+        "J_xi": (edge_gids, "edge_xi"),
+        "J_eta": (edge_gids, "edge_eta"),
+        "J_zeta": (edge_gids, "edge_zeta"),
+    }
+    common_names = set(restarts[0].fields)
+    if any(set(r.fields) != common_names for r in restarts[1:]):
+        raise ValidationError("restart field schema differs across ranks")
+    target={name: spec[0] for name,spec in supported.items() if name in common_names}
     out={}; indexes={k:GlobalIDIndex.build(v) for k,v in target.items()}; valid_masks={k:np.ones(v.size,dtype=bool) for k,v in target.items()}
     if manifest is not None:
         specs={str(x["name"]):x for x in manifest.existing_dynamic_data.get("fields",[])}
         fluid_bit=int(manifest.cell_flag_bits.get("fluid",0))
         for name in ("U_H","U_Na"):
+            if name not in target:
+                continue
             if specs.get(name,{}).get("physics_domain") == "Fluid" and fluid_bit:
                 valid_masks[name]=(geometry.cell_flags & np.uint32(fluid_bit)) != 0
     for name,gids in target.items():
         comps=restarts[0].fields[name].components
         # Each B_* field owns only its matching stagger family; zeros on the
         # other two families make their sum the unified global Face field.
-        fill=0.0 if name.startswith("B_") else np.nan
+        fill=0.0 if name.startswith(("B_", "J_")) else np.nan
         out[name]=np.full((gids.size,comps),fill,dtype=np.float64)
-    loc_by_field={"U_H":"cell","U_Na":"cell","B_xi":"face_xi","B_eta":"face_eta","B_zeta":"face_zeta"}
+    loc_by_field={name:supported[name][1] for name in target}
     inactive: dict[str,list[tuple[int,int]]]={name:[] for name in target}
     for rr,topo in zip(restarts,topologies):
         maps={(m.block_id,m.location):m for m in topo.local_maps}
@@ -168,7 +194,7 @@ def assemble_dynamic(restarts: list[RankRestart], topologies: list[RankTopology]
                 # arrays are represented in native i/j/k axes.
                 gids=m.global_ids; mask=m.owner_mask
                 idx=indexes[name].lookup(gids[mask]); selected=vals[mask]
-                if loc.startswith("face_"): selected=selected/m.orientation_sign[mask,None]
+                if loc.startswith(("face_", "edge_")): selected=selected*m.orientation_sign[mask,None]
                 out[name][idx]=selected
     for name,a in out.items():
         applicable=valid_masks[name]

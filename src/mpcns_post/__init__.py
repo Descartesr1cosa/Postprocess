@@ -11,6 +11,12 @@ from .access import (
 )
 from .case import MPCNSCase
 from .derived import PrimitiveSpecies, UnitConverter, conserved_to_primitive
+from .dec import (
+    DECCurrent,
+    reconstruct_current,
+    reconstruct_current_cell,
+    reconstruct_current_edge,
+)
 from .manifest import load_manifest
 from .restart import read_rank_restart
 from .selection import select_box, select_plane, select_sphere
@@ -31,6 +37,7 @@ __all__ = [
     "Block",
     "DerivedField",
     "DerivedFieldRegistry",
+    "DECCurrent",
     "EntityView",
     "FieldCollection",
     "FluxResult",
@@ -48,10 +55,13 @@ __all__ = [
     "integrate_surface_flux",
     "load_manifest",
     "read_rank_restart",
+    "reconstruct_current",
+    "reconstruct_current_cell",
+    "reconstruct_current_edge",
     "select_boundary_faces",
     "select_box",
     "select_plane",
     "select_sphere",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

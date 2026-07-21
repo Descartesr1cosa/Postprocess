@@ -334,9 +334,13 @@ class MPCNSCase:
 
     @property
     def available_fields(self) -> tuple[str, ...]:
-        dynamic_names = tuple(
-            str(field["name"])
-            for field in self.manifest.existing_dynamic_data.get("fields", [])
+        dynamic_names = (
+            tuple(self._dynamic.fields)
+            if self._dynamic is not None
+            else tuple(
+                str(field["name"])
+                for field in self.manifest.existing_dynamic_data.get("fields", [])
+            )
         )
         constant_names = tuple(str(field["name"]) for field in self.manifest.fields)
         return tuple(dict.fromkeys((*dynamic_names, *constant_names, *self.derived.definitions)))
@@ -380,7 +384,10 @@ class MPCNSCase:
             for field in self.manifest.existing_dynamic_data.get("fields", [])
         }
         if name in dynamic_names:
-            return self._require_dynamic().fields[name]
+            dynamic = self._require_dynamic()
+            if name not in dynamic.fields:
+                raise KeyError(f"field {name!r} is declared but absent from this restart")
+            return dynamic.fields[name]
         if any(field["name"] == name for field in self.manifest.fields):
             return self._assemble_constant_field(name)
         raise KeyError(f"unknown field {name!r}")
@@ -435,6 +442,33 @@ class MPCNSCase:
         if not np.all(np.isfinite(out)): raise ValidationError("B reconstruction left unfilled cells")
         return out
 
+    def reconstruct_current_dec(self, *, validate_debug: bool = False):
+        """Return Edge 1-form and Cell-vector current via the v3 DEC operators."""
+        from .dec import reconstruct_current
+
+        return reconstruct_current(self, validate_debug=validate_debug)
+
+    def reconstruct_J_edge(self, *, physical: bool = False, validate_debug: bool = False):
+        """Return DEC Edge ``J dot dr`` (normalized, or physical A/m)."""
+        from .dec import reconstruct_current_edge
+
+        return reconstruct_current_edge(
+            self, physical=physical, validate_debug=validate_debug
+        )
+
+    def compute_current_dec(
+        self,
+        *,
+        unit: str | None = "A/m^2",
+        validate_debug: bool = False,
+    ):
+        """Return solver-equivalent Cartesian Cell current density."""
+        from .dec import reconstruct_current_cell
+
+        return reconstruct_current_cell(
+            self, unit=unit, validate_debug=validate_debug
+        )
+
     def compute_primitive(self,species: str,fields=None):
         """Compute H or Na primitive variables from global conserved state."""
         fields=fields or self._dynamic
@@ -481,6 +515,18 @@ class MPCNSCase:
                 p=self.compute_primitive(s,f); valid=np.isfinite(p.density)
                 report.add("info","physics",f"{s}: applicable cells={np.count_nonzero(valid)}, inactive cells={np.count_nonzero(~valid)}, rho=[{np.nanmin(p.density):.6g},{np.nanmax(p.density):.6g}], pressure=[{np.nanmin(p.pressure):.6g},{np.nanmax(p.pressure):.6g}], nonpositive pressure={np.count_nonzero(p.pressure[valid]<=0)}")
             report.add("info","physics",f"B_cell |B|=[{np.linalg.norm(b,axis=1).min():.6g},{np.linalg.norm(b,axis=1).max():.6g}]")
+            if self.reconstruction.B_face_to_J_edge is not None:
+                has_debug = all(name in f.fields for name in ("J_xi", "J_eta", "J_zeta"))
+                current = self.reconstruct_current_dec(validate_debug=has_debug)
+                detail = (
+                    f", debug J_edge max abs error={current.debug_edge_max_abs_error:.3e}"
+                    if current.debug_edge_max_abs_error is not None else ""
+                )
+                report.add(
+                    "info", "physics",
+                    f"DEC J_cell |J|=[{np.linalg.norm(current.cell_vector,axis=1).min():.6g},"
+                    f"{np.linalg.norm(current.cell_vector,axis=1).max():.6g}]{detail}",
+                )
         except Exception as exc: report.add("error","restart",str(exc))
         return report
 

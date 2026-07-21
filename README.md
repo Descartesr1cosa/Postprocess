@@ -2,8 +2,8 @@
 
 `mpcns_post` reads, validates, and globally assembles MPCNS Mercury output in a
 single Python process. It has no runtime or import dependency on the solver
-source tree, MPI, or `~/MPCNS_Mercury`; the solver source was consulted only to
-confirm the version-1 byte layout.
+source tree, MPI, or `~/MPCNS_Mercury`. It supports legacy manifest v1 and the
+expanded manifest v3 geometry, topology, and DEC reconstruction data.
 
 ## Install
 
@@ -45,26 +45,23 @@ python -m mpcns_post.cli export-fields /path/to/DATA_bin \
 
 ## Runnable Python examples
 
-Inspection and validation are collected in one diagnostics script. Tecplot
-export is also available as a standalone Python workflow, in addition to the
-CLI command above.
+The examples are deliberately limited to one DEC test and the complete Node
+species/electromagnetic exporter.
 
 ```bash
-python examples/case_diagnostics.py /path/to/DATA_bin \
-  --data-dir /path/to/DATA
+python examples/dec_current.py /path/to/DATA_bin \
+  --data-dir /path/to/DATA --validate-debug
 
-python examples/export_tecplot.py /path/to/DATA_bin \
-  --data-dir /path/to/DATA \
-  --output-dir /path/to/post_output \
-  --prefix mercury
+# Edit its settings block first.
+python examples/export_node_species_em.py
 ```
 
 See [`examples/README.md`](examples/README.md) for the focused reconstruction
 example and the complete example layout.
 
-## Confirmed version-1 layouts
+## Supported layouts
 
-Static files have an 80-byte `MPCNSBIN` header. Every section has a 32-byte
+Static container files retain the version-1 80-byte `MPCNSBIN` header. Every section has a 32-byte
 zero-padded name followed by scalar type, component count, entity count, byte
 count, and a packed payload. The current topology writer emits a legacy naming
 collision for the reverse-incidence `edge_global_id` and `face_global_id`
@@ -82,6 +79,12 @@ with `i` fastest. Restart arrays include ghost layers; assembly indexes the
 physical map coordinates through the stored restart extent and retains only
 owner entities. It does not infer the physical region merely by trimming a
 fixed ghost width.
+
+Manifest v3 adds the complete restart B-face storage catalog, including raw
+physical/interface/coupling ghosts, plus solver-materialized
+`B_face_to_J_edge` and `J_edge_to_cell_cartesian` operators. Normal production
+restarts contain only fluid state and induced B; the optional J-edge triplet is
+accepted solely for validation.
 
 The manifest may restrict a restart field to a physics domain. For example,
 `U_H` and `U_Na` currently have `physics_domain="Fluid"`; inactive blocks whose
@@ -227,9 +230,31 @@ B_cell = case.reconstruct_B_cell(fields)
 H = case.compute_primitive("H", fields)
 ```
 
+### DEC current reconstruction
+
+Manifest v3 cases reconstruct the same current path as Mercury from induced B
+alone. Saved operators include final Hodge factors, orientations, alias
+reduction, singular-edge treatment, boundary ghosts, and the pole override.
+Prescribed `Badd_*` is excluded, matching the solver.
+
+```python
+case = MPCNSCase.load("/path/to/DATA_bin", data_dir="/path/to/DATA")
+
+dec = case.reconstruct_current_dec()
+J_edge_nd = dec.edge_1form       # normalized Edge J·dr
+J_cell_nd = dec.cell_vector      # normalized Cartesian Cell J
+
+J_cell_A_m2 = case.compute_current_dec(unit="A/m^2")
+J_cell_nA_m2 = case.compute_current_dec(unit="nA/m^2")
+
+# Only for a debug restart containing J_xi/J_eta/J_zeta:
+checked = case.reconstruct_current_dec(validate_debug=True)
+print(checked.debug_edge_max_abs_error)
+```
+
 ## Known limitations
 
-Version 1 and little-endian float64/int64 data are supported. Each rank file is
+Manifest versions 1 and 3 and little-endian float64/int64 data are supported. Each rank file is
 the latest overwritten checkpoint, not a time-series archive. Regional
 constant-B diagnostics for axis-touching and near-axis-shell cells are reported
 as unavailable because the current v1 cell flags do not encode those regions.
@@ -273,8 +298,8 @@ density in cm^-3, velocity in km/s, pressure in nPa, temperature in K, magnetic
 field in nT, and current density in nA/m^2. Neutral Na is recovered from the
 saved photo-production field using the solver-defined illuminated/shadow
 frequencies; different cases can override them with
-`--illuminated-frequency` and `--shadow-frequency`. Total B is induced B plus the saved additive field. Current is a
-cell-centered curvilinear numerical curl of induced B, normalized by the
-manifest `current_density_ref`; it is not the solver's unavailable mimetic
-J-edge reconstruction. Each output is immediately read back to exact EOF, and
+`--illuminated-frequency` and `--shadow-frequency`. Total B is induced B plus the saved additive field. With v3 static
+data, current uses the solver-equivalent DEC reconstruction from induced B;
+legacy v1 data retains the cell-centered curl fallback because it has no DEC
+operators. Each output is immediately read back to exact EOF, and
 an `<prefix>_export_summary_<location>.json` is written beside the PLT files.

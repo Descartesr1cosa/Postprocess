@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 from .errors import ValidationError
 from .static_sections import read_static_file
-from .types import CSRConnectivity, LocalEntityMap, Manifest, RankTopology
+from .types import CSRConnectivity, FaceStorageTopology, LocalEntityMap, Manifest, RankTopology
 
 LOCATIONS=("node","cell","edge_xi","edge_eta","edge_zeta","face_xi","face_eta","face_zeta")
 MAP_RE=re.compile(r"^(b\d{4}_\d+)_(shape|gid|sign|owner)$")
@@ -61,7 +61,47 @@ def read_rank_topology(path: str | Path, *, rank: int, manifest: Manifest) -> Ra
         if not np.all(allowed): raise ValidationError(f"{path}: invalid orientation signs {base}")
         maps.append(LocalEntityMap(block,LOCATIONS[loc],(ni,nj,nk),gids,signs,owners))
     bc=v("block_connections")
-    return RankTopology(rank,f2e,c2f,rel[0],rel[1],rel[2],maps,bc)
+    storage_names = {
+        "Bstore_meta", "Bstore_global_id", "Bstore_quotient_id",
+        "Bstore_address", "Bstore_sign", "Bstore_owner", "Bstore_flags",
+    }
+    present = storage_names & s.keys()
+    storage = None
+    if present:
+        if present != storage_names:
+            raise ValidationError(f"{path}: incomplete B-face storage topology")
+        meta = np.asarray(v("Bstore_meta")).reshape(-1)
+        gids = v("Bstore_global_id")
+        qids = v("Bstore_quotient_id")
+        addresses = v("Bstore_address")
+        signs = v("Bstore_sign").astype(np.int32)
+        owners_raw = v("Bstore_owner")
+        flags = v("Bstore_flags").astype(np.uint32)
+        if meta.size != 2 or meta[0] < 0 or meta[1] < meta[0]:
+            raise ValidationError(f"{path}: invalid Bstore_meta")
+        count = gids.size
+        if (
+            qids.shape != (count,)
+            or addresses.shape != (count, 6)
+            or signs.shape != (count,)
+            or owners_raw.shape != (count,)
+            or flags.shape != (count,)
+        ):
+            raise ValidationError(f"{path}: inconsistent B-face storage arrays")
+        if np.any((owners_raw != 0) & (owners_raw != 1)):
+            raise ValidationError(f"{path}: Bstore_owner must contain only 0/1")
+        if np.any(gids < 0) or np.any(gids >= meta[1]):
+            raise ValidationError(f"{path}: Bstore_global_id outside declared column space")
+        quotient = qids >= 0
+        if np.any(qids[quotient] >= meta[0]) or np.any(qids[~quotient] != -1):
+            raise ValidationError(f"{path}: invalid Bstore quotient IDs")
+        if np.any((signs[quotient] != -1) & (signs[quotient] != 1)):
+            raise ValidationError(f"{path}: quotient Bstore signs must equal +/-1")
+        storage = FaceStorageTopology(
+            int(meta[0]), int(meta[1]), gids, qids, addresses, signs,
+            owners_raw.astype(bool), flags,
+        )
+    return RankTopology(rank,f2e,c2f,rel[0],rel[1],rel[2],maps,bc,storage)
 
 
 def adjacency_histogram(csr: CSRConnectivity) -> dict[int,int]:

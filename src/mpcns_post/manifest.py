@@ -15,15 +15,18 @@ def _require(data: dict, key: str):
 
 
 def load_manifest(path: str | Path) -> Manifest:
-    """Load and validate a version-1 MPCNS post-data manifest."""
+    """Load and validate a supported MPCNS post-data manifest (v1 or v3)."""
     p = Path(path)
     if p.is_dir(): p = p / "manifest.json"
     try: data = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc: raise ManifestError(f"{p}: cannot load manifest: {exc}") from exc
-    expected = {"format_name":"MPCNS_PostData", "format_version":1, "endianness":"little",
+    expected = {"format_name":"MPCNS_PostData", "endianness":"little",
                 "float_type":"float64", "index_type":"int64", "dimension":3}
     for key, value in expected.items():
         if _require(data,key) != value: raise ManifestError(f"{p}: {key} must be {value!r}, got {data[key]!r}")
+    version = _require(data, "format_version")
+    if version not in (1, 3):
+        raise ManifestError(f"{p}: format_version must be 1 or 3, got {version!r}")
     uuid_re = re.compile(r"^[0-9a-fA-F]{32}$")
     for key in ("case_uuid", "mesh_uuid"):
         if not isinstance(_require(data,key),str) or not uuid_re.fullmatch(data[key]): raise ManifestError(f"{p}: {key} must be 32 hexadecimal characters")
@@ -58,4 +61,7 @@ def load_manifest(path: str | Path) -> Manifest:
         {k:float(v) for k,v in norm.items()},{k:float(v) for k,v in phys.items()},tuple(_require(data,"species")),
         {k:tuple(v) for k,v in files.items()},dynamic,tuple(operators),tuple(fields),
         {str(k):str(v) for k,v in data.get("block_physics_codes",{}).items()},
-        {str(k):int(v) for k,v in data.get("cell_flag_bits",{}).items()})
+        {str(k):int(v) for k,v in data.get("cell_flag_bits",{}).items()},
+        data.get("Bface_operator_column_space", {}),
+        data.get("dec_current_semantics", {}),
+        {str(k):int(v) for k,v in data.get("Bstore_flag_bits",{}).items()})

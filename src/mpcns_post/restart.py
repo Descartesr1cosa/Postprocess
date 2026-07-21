@@ -21,12 +21,19 @@ def read_rank_restart(path: str | Path, *, rank: int, manifest: Manifest) -> Ran
     if version != dyn.get("format_version",1): raise BinaryFormatError(f"{r.path}: unsupported restart version {version}")
     if not math.isfinite(time) or nblock < 0 or nfield < 0: raise BinaryFormatError(f"{r.path}: invalid restart header")
     specs=dyn.get("fields",[])
-    if nfield != len(specs): raise BinaryFormatError(f"{r.path}: nfield {nfield} != manifest {len(specs)}")
-    location_by_code={int(x["location_code"]):str(x["location"]) for x in specs}
+    optional_names = {"J_xi", "J_eta", "J_zeta"} if dyn.get("optional_dec_jedge") else set()
+    required_specs = [x for x in specs if str(x.get("name")) not in optional_names]
+    if nfield not in {len(required_specs), len(specs)}:
+        raise BinaryFormatError(
+            f"{r.path}: nfield {nfield} must contain required fields ({len(required_specs)}) "
+            f"or required plus the complete optional DEC triplet ({len(specs)})"
+        )
+    actual_specs = specs if nfield == len(specs) else required_specs
+    location_by_code={int(x["location_code"]):str(x["location"]) for x in actual_specs}
     fields={}
     for fi in range(nfield):
         name=r.read_length_prefixed_string(); loc=r.read_int32(); comps=r.read_int32(); nghost=r.read_int32()
-        spec=specs[fi]
+        spec=actual_specs[fi]
         got=(name,loc,comps,nghost); expected=(spec["name"],int(spec["location_code"]),int(spec["components"]),int(spec["nghost"]))
         if got != expected: raise BinaryFormatError(f"{r.path} at field {fi}: metadata {got!r} != manifest {expected!r}")
         blocks=[]
