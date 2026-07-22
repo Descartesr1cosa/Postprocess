@@ -8,7 +8,12 @@ version = "0.3.0"
 description = "API-first serial scientific post-processing for MPCNS Mercury output"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.23"]
+# SciPy is required by examples/post/post_virtual_flight.py for the nearest
+# Cell lookup along the MESSENGER trajectory.
+dependencies = [
+    "numpy>=1.23",
+    "scipy>=1.9",
+]
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
@@ -16,6 +21,11 @@ visualization = ["matplotlib", "pyvista"]
 
 [project.scripts]
 mpcns-post = "mpcns_post.cli:main"
+
+[tool.setuptools.packages.find]
+# Be explicit about the src-layout so editable and wheel installs discover
+# mpcns_post identically in a fresh environment.
+where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
