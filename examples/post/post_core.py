@@ -1,18 +1,14 @@
 """
 Read MPCNS binary output, compute H+/Na+ and electromagnetic variables,
-project Cell values to Nodes, and write two Tecplot PLT files.
-
-Outputs
--------
-1. mercury_species_node.plt
-2. mercury_electromagnetic_node.plt
+and project shared Cell values to Nodes.
 
 Important
 ---------
 - All physical calculations are first performed on global Cell arrays.
 - The stored cell_scalar_to_node reconstruction is then used component-wise.
 - Only Fluid blocks are written.
-- The current density uses the solver-equivalent DEC API and induced B only.
+- The current density is the post-processing curvilinear curl of induced B,
+  not the solver's edge/mimetic current.
 - The ambipolar electric field needs an electron-pressure closure. Edit
   ELECTRON_PRESSURE_MODEL below to match the physical model.
 """
@@ -21,29 +17,37 @@ from pathlib import Path
 
 import numpy as np
 
-from mpcns_post import MPCNSCase
 from mpcns_post.assemble import GlobalIDIndex
 from mpcns_post.errors import ValidationError
 from mpcns_post.tecplot import (
-    TecplotZone,
-    inspect_tecplot_binary,
     project_cell_values_to_nodes,
-    write_tecplot_binary,
 )
+from post_case_io import load_case
 
 
 # ============================================================
 # 1. User settings
 # ============================================================
 
-DIR = Path(r"E:\\2_ClassFiles\\x2025\\Autumn\\Mercury\\python\\Postprocess\\out28")
-
-STATIC_DIR = DIR / "DATA_bin"
-DYNAMIC_DIR = DIR / "DATA"
-OUTPUT_DIR = DIR / "tecplot_output2"
+DIR = Path(globals().get(
+    "CASE_DIR",
+    r"E:\\2_ClassFiles\\x2025\\Autumn\\Mercury\\python\\Postprocess\\out28",
+))
+OUTPUT_DIR = DIR / "tecplot_output"
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+
+# False:
+#     普通生产 restart，不要求保存 J_xi/J_eta/J_zeta
+#
+# True:
+#     debug restart 中必须存在 J_xi/J_eta/J_zeta，
+#     并检查 Python DEC 重建和求解器输出是否一致
+VALIDATE_DEC_WITH_DEBUG_JEDGE = globals().get(
+    "VALIDATE_DEC_WITH_DEBUG_JEDGE",
+    False,
+)
 
 # Electron-pressure closure used only for the ambipolar field:
 #
@@ -134,22 +138,6 @@ def reconstruct_additive_B_cell(case):
         )
 
     return B_add_cell
-
-
-def compute_current_cell(case, B_induced_cell_nd):
-    """
-    Compute solver-equivalent DEC current density on Cells.
-
-    Returns
-    -------
-    J_A_m2 : ndarray, shape (Ncell, 3)
-    """
-
-    # Keep the existing helper signature and the rest of the export workflow
-    # unchanged. DEC acts on the original restart Face 2-form, not B_cell.
-    _ = B_induced_cell_nd
-    return case.compute_current_dec(unit="A/m^2")
-
 
 def curvilinear_gradient(xyz, scalar):
     """
@@ -292,178 +280,14 @@ def compute_gradient_on_fluid_cells(case, scalar_cell):
 
     return gradient
 
-def split_vector_fields(fields):
-    """
-    Expand arrays shaped (N, 3) into x/y/z scalar arrays.
-
-    Put {c} in the vector name where x/y/z should appear.
-    """
-
-    output = {}
-
-    for name, values in fields.items():
-
-        # 提前检查 Tecplot 变量名是否为 ASCII
-        try:
-            name.encode("ascii")
-        except UnicodeEncodeError as exc:
-            raise ValueError(
-                f"Tecplot variable name must be ASCII: {name!r}"
-            ) from exc
-
-        array = np.asarray(values)
-
-        if array.ndim == 1:
-
-            if "{c}" in name:
-                raise ValueError(
-                    f"Scalar field {name!r} must not contain '{{c}}'"
-                )
-
-            output[name] = array
-
-        elif array.ndim == 2 and array.shape[1] == 3:
-
-            for component_index, component_name in enumerate(
-                ("x", "y", "z")
-            ):
-
-                if "{c}" in name:
-                    output_name = name.replace(
-                        "{c}",
-                        component_name,
-                    )
-                else:
-                    output_name = (
-                        f"{name}_{component_name}"
-                    )
-
-                if output_name in output:
-                    raise ValueError(
-                        f"Duplicate Tecplot variable name "
-                        f"{output_name!r}"
-                    )
-
-                output[output_name] = (
-                    array[:, component_index]
-                )
-
-        else:
-            raise ValueError(
-                f"{name}: expected shape (N,) or (N,3), "
-                f"got {array.shape}"
-            )
-
-    return output
-
-def write_fluid_node_tecplot(
-    case,
-    node_fields,
-    output_path,
-    title,
-):
-    """
-    Write Node arrays for Fluid blocks only.
-
-    This avoids exporting undefined H+/Na+/electric-field values
-    in Solid blocks.
-    """
-
-    scalar_fields = split_vector_fields(
-        node_fields
-    )
-
-    all_fields = {
-        "<times><i>x</i> (/R)": case.nodes.coordinates[:, 0],
-        "<times><i>y</i> (/R)": case.nodes.coordinates[:, 1],
-        "<times><i>z</i> (/R)": case.nodes.coordinates[:, 2],
-        **scalar_fields,
-    }
-
-    node_blocks = {
-        (block.rank, block.block_id): block
-        for block in case.iter_blocks(location="node")
-    }
-
-    zones = []
-
-    for cell_block in case.iter_blocks(location="cell"):
-
-        if cell_block.physics != "Fluid":
-            continue
-
-        key = (
-            cell_block.rank,
-            cell_block.block_id,
-        )
-
-        node_block = node_blocks[key]
-
-        zone_values = {
-            name: node_block.reshape(values)
-            for name, values in all_fields.items()
-        }
-
-        for name, values in zone_values.items():
-
-            if not np.all(np.isfinite(values)):
-                bad = np.count_nonzero(
-                    ~np.isfinite(values)
-                )
-
-                raise ValidationError(
-                    f"rank {cell_block.rank}, block {cell_block.block_id}, "
-                    f"field {name}: {bad} non-finite Node values"
-                )
-
-        zones.append(
-            TecplotZone(
-                name=(
-                    f"rank{cell_block.rank:04d}_"
-                    f"block{cell_block.block_id:04d}_Fluid"
-                ),
-                physics="Fluid",
-                values=zone_values,
-            )
-        )
-
-    if not zones:
-        raise RuntimeError(
-            "No Fluid block was found"
-        )
-
-    solution_time = float(
-        case.latest_restart[0].time
-    )
-
-    written_path = write_tecplot_binary(
-        output_path,
-        title=title,
-        variable_names=tuple(all_fields),
-        zones=zones,
-        solution_time=solution_time,
-    )
-
-    return inspect_tecplot_binary(
-        written_path
-    )
-
-
 # ============================================================
 # 3. Read static geometry/topology and latest restart
 # ============================================================
 
-case = MPCNSCase.load(
-    STATIC_DIR,
-    data_dir=DYNAMIC_DIR,
-)
-
+loaded = load_case(DIR)
+case = loaded.case
 units = case.unit_converter
-
-fluid_mask = (
-    case.H.valid_mask
-    & case.Na.valid_mask
-)
+fluid_mask = loaded.fluid_mask
 
 
 # ============================================================
@@ -666,24 +490,97 @@ B_total_magnitude_nT = np.linalg.norm(
 
 
 # ============================================================
-# 8. Current density on Cells
+# 8. Solver-equivalent DEC current
 # ============================================================
 
-J_induced_A_m2 = compute_current_cell(
-    case,
-    B_induced_cell_nd,
+# 一次完成：
+#
+# B_face 2-form
+#     -> DEC J_edge 1-form
+#     -> Cartesian J_cell
+#
+dec_current = case.reconstruct_current_dec(
+    validate_debug=VALIDATE_DEC_WITH_DEBUG_JEDGE,
 )
 
-J_induced_nA_m2 = (
-    J_induced_A_m2
-    * 1.0e9
+
+# ------------------------------------------------------------
+# Edge DEC current
+# ------------------------------------------------------------
+
+# 全局 quotient Edge ID
+J_edge_global_ids = (
+    dec_current.edge_global_ids
 )
 
+# 无量纲 Edge 1-form:
+#
+#     J_edge = J dot dr
+#
+# 注意：
+# 它不是 Cartesian Jx/Jy/Jz
+J_edge_1form_nd = (
+    dec_current.edge_1form
+)
+
+
+# ------------------------------------------------------------
+# Cartesian Cell current density
+# ------------------------------------------------------------
+
+# 无量纲 Cartesian Cell current
+#
+# shape = (Ncell, 3)
+J_induced_cell_nd = (
+    dec_current.cell_vector
+)
+
+
+# 转换到 A/m^2
+J_induced_A_m2 = units.convert(
+    J_induced_cell_nd,
+    quantity="current_density",
+    unit="A/m^2",
+)
+
+
+# 转换到 nA/m^2
+J_induced_nA_m2 = units.convert(
+    J_induced_cell_nd,
+    quantity="current_density",
+    unit="nA/m^2",
+)
+
+
+# 电流强度
 J_induced_magnitude_nA_m2 = np.linalg.norm(
     J_induced_nA_m2,
     axis=1,
 )
 
+
+print()
+print("DEC current reconstruction:")
+print(
+    "J_edge shape:",
+    J_edge_1form_nd.shape,
+)
+
+print(
+    "J_cell shape:",
+    J_induced_cell_nd.shape,
+)
+
+print(
+    "|J_cell| nA/m^2:",
+    np.nanmin(J_induced_magnitude_nA_m2),
+    np.nanmax(J_induced_magnitude_nA_m2),
+)
+
+print(
+    "debug J_edge max error:",
+    dec_current.debug_edge_max_abs_error,
+)
 
 # ============================================================
 # 9. Motional and Hall electric fields on Cells
@@ -849,6 +746,8 @@ CELL_ARRAYS = {
     "B_induced_nT": B_induced_nT,
     "B_additive_nT": B_additive_nT,
     "B_total_nT": B_total_nT,
+    "J_induced_cell_nd": J_induced_cell_nd,
+    "J_induced_A_m2": J_induced_A_m2,
     "J_induced_nA_m2": J_induced_nA_m2,
     "E_motional_mV_m": E_motional_mV_m,
     "E_Hall_mV_m": E_Hall_mV_m,
@@ -856,6 +755,22 @@ CELL_ARRAYS = {
     "E_generalized_mV_m": E_generalized_mV_m,
 }
 
+EDGE_ARRAYS = {
+    "edge_global_ids":
+        J_edge_global_ids,
+
+    "edge_coordinates_RM":
+        case.edges.coordinates,
+
+    "edge_dr_RM":
+        case.geometry.edge_dr,
+
+    "edge_length_RM":
+        case.edges.measure,
+
+    "J_edge_1form_nd":
+        J_edge_1form_nd,
+}
 
 # ============================================================
 # 12. Additional magnitudes on Cells
@@ -1190,145 +1105,3 @@ NODE_ARRAYS = {
     "ion_charge_speed_km_s":
         to_fluid_nodes(ion_charge_speed_km_s),
 }
-
-
-# ============================================================
-# 14. Write four Fluid-only Node Tecplot files
-# ============================================================
-fluid_output_path = (
-    OUTPUT_DIR
-    / "00_fluid_H_Na_node.plt"
-)
-
-output_1_path = (
-    OUTPUT_DIR
-    / "01_em_total_B_J_E_node.plt"
-)
-
-output_2_path = (
-    OUTPUT_DIR
-    / "02_em_B_induced_add_node.plt"
-)
-
-output_3_path = (
-    OUTPUT_DIR
-    / "03_em_E_components_node.plt"
-)
-
-output_4_path = (
-    OUTPUT_DIR
-    / "04_em_auxiliary_node.plt"
-)
-
-fluid_info = write_fluid_node_tecplot(
-    case,
-    NODE_FLUID,
-    fluid_output_path,
-    title="MPCNS H+ and Na+ primitive variables at Nodes",
-)
-
-info_1 = write_fluid_node_tecplot(
-    case,
-    NODE_EM_TOTAL,
-    output_1_path,
-    title="MPCNS total B, J and total E at Nodes",
-)
-
-info_2 = write_fluid_node_tecplot(
-    case,
-    NODE_EM_B_DECOMPOSITION,
-    output_2_path,
-    title="MPCNS induced and additive magnetic fields at Nodes",
-)
-
-info_3 = write_fluid_node_tecplot(
-    case,
-    NODE_EM_E_COMPONENTS,
-    output_3_path,
-    title="MPCNS electric-field components at Nodes",
-)
-
-info_4 = write_fluid_node_tecplot(
-    case,
-    NODE_EM_AUXILIARY,
-    output_4_path,
-    title="MPCNS auxiliary electromagnetic quantities at Nodes",
-)
-
-
-# ============================================================
-# 15. Print results
-# ============================================================
-
-OUTPUT_INFOS = {
-    "00_fluid_H_Na": fluid_info,
-    "01_total_B_J_E": info_1,
-    "02_B_induced_add": info_2,
-    "03_E_components": info_3,
-    "04_auxiliary": info_4,
-}
-
-
-print()
-print("Generated Tecplot files:")
-
-for name, info in OUTPUT_INFOS.items():
-
-    print()
-    print(name)
-    print("path:", info.path)
-    print("variables:")
-
-    for variable_name in info.variables:
-        print("  ", variable_name)
-
-    print("zones:", len(info.zones))
-
-
-print()
-print("Available exposed Cell arrays:")
-
-for name, values in CELL_ARRAYS.items():
-    print(
-        f"{name:42s}",
-        np.asarray(values).shape,
-    )
-
-
-print()
-print("Available exposed Node arrays:")
-
-for name, values in NODE_ARRAYS.items():
-    print(
-        f"{name:42s}",
-        np.asarray(values).shape,
-    )
-
-
-# ============================================================
-# 16. Simple examples for additional post-processing
-# ============================================================
-
-# Example 1: select Nodes near y = 0.
-#
-# node_xyz = NODE_ARRAYS["node_coordinates_RM"]
-# y0_mask = np.abs(node_xyz[:, 1]) < 1.0e-8
-#
-# B_y0 = NODE_ARRAYS["B_total_nT"][y0_mask]
-# J_y0 = NODE_ARRAYS["J_induced_nA_m2"][y0_mask]
-# E_y0 = NODE_ARRAYS["E_generalized_mV_m"][y0_mask]
-
-
-# Example 2: obtain Hall electric-field magnitude on Nodes.
-#
-# E_Hall_magnitude_node = NODE_ARRAYS[
-#     "E_Hall_magnitude_mV_m"
-# ]
-
-
-# Example 3: obtain electron pressure on Cells.
-#
-# pe_cell_nPa = (
-#     CELL_ARRAYS["electron_pressure_Pa"]
-#     * 1.0e9
-# )
