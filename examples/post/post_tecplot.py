@@ -1,5 +1,14 @@
 """Write the standard Fluid Node Tecplot files from data built by post_core."""
 
+import numpy as np
+
+from mpcns_post.errors import ValidationError
+from mpcns_post.tecplot import (
+    TecplotZone,
+    inspect_tecplot_binary,
+    write_tecplot_binary,
+)
+
 TECPLT_HELPERS = r'''
 +def split_vector_fields(fields):
     """
@@ -165,6 +174,15 @@ def write_fluid_node_tecplot(
 def export_node_tecplot(data: dict) -> dict:
     """Write the five standard Node PLT files and return their file info."""
     scope = dict(data)
+    # The writer below is defined through exec(), so give its global namespace
+    # every dependency explicitly instead of relying on post_core.py imports.
+    scope.update(
+        np=np,
+        TecplotZone=TecplotZone,
+        ValidationError=ValidationError,
+        inspect_tecplot_binary=inspect_tecplot_binary,
+        write_tecplot_binary=write_tecplot_binary,
+    )
     exec(TECPLT_HELPERS.replace("\n+", "\n"), scope)
     case = scope["case"]
     output_dir = scope["OUTPUT_DIR"]
