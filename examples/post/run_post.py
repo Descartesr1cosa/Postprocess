@@ -9,6 +9,7 @@ from pathlib import Path
 from post_tecplot import export_node_tecplot
 from post_na_altitude import export_na_altitude_profiles
 from post_virtual_flight import export_virtual_flight
+from post_flux_rope import export_flux_rope
 import runpy
 
 
@@ -21,9 +22,11 @@ CASE_DIR = Path(r"E:\path\to\your\MPCNS\output")
 # Main fluid / electromagnetic Tecplot Node files.
 RUN_NODE_TECPLT = False
 # dawn.dat, subsolar.dat and dusk.dat Na+ altitude profiles.
-RUN_NA_ALTITUDE_PROFILES = True
+RUN_NA_ALTITUDE_PROFILES = False
 # MESSENGER trajectory sampled from the nearest simulation Cell.
-RUN_VIRTUAL_FLIGHT = True
+RUN_VIRTUAL_FLIGHT = False
+# Flux-rope LMN plane and surrounding magnetic-field-line seed bundle.
+RUN_FLUX_ROPE = True
 # Your current DATA/DATA_bin are debug outputs.  Enable this to compare the
 # reconstructed DEC current with the solver's saved edge current.
 VALIDATE_DEC_WITH_DEBUG_JEDGE = False
@@ -45,3 +48,5 @@ if __name__ == "__main__":
         export_na_altitude_profiles(data)
     if RUN_VIRTUAL_FLIGHT:
         export_virtual_flight(data)
+    if RUN_FLUX_ROPE:
+        export_flux_rope(data)
