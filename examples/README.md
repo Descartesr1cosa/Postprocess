@@ -33,6 +33,25 @@ The modules have separate responsibilities:
   Tecplot output.
 - `messenger_mso_data.py`: standalone MESSENGER MAG MSO reader/averager.
 
+## Grid/time convergence example
+
+`converge/` processes either one current output (`DATA_bin` + `DATA`) or every
+archived output (`DATA_bin` + `DATA_archive/Step_*_Time_*`).  It retains static
+data only, reads one `flow_field####.bin` time directory at a time, and writes
+an ASCII Tecplot time history plus JSON mean/standard-deviation summary to
+`DATA_DIR/tecplot_output`.
+
+Edit `converge/run_converge.py` and run:
+
+```bash
+python examples/converge/run_converge.py
+```
+
+The initial quantities are the subsolar magnetopause x position (5-cell
+locally averaged DEC-current maximum) and bow-shock x position (outermost
+fast-magnetosonic Mach-one crossing).  The subsolar tube radius, x range, and
+3--5-cell local average are explicit settings at the top of the runner.
+
 To validate a case without the full example workflow:
 
 ```bash
