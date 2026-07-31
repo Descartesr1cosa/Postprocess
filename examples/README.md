@@ -52,6 +52,14 @@ locally averaged DEC-current maximum) and bow-shock x position (outermost
 fast-magnetosonic Mach-one crossing).  The subsolar tube radius, x range, and
 3--5-cell local average are explicit settings at the top of the runner.
 
+The same runner can also write `plane_xo_points.dat` for one `x/y/z=value`
+cell-centred slab.  It reports tail X-points first and then dayside X/O points
+as a topology chain: an in-plane monotonic coordinate is used when possible,
+otherwise nearest neighbours with alternating X/O type are preferred.  Each
+`x_i,y_i,z_i` group has `type_i` (`0=X`, `1=O`) and is zero-padded to the
+largest point count found in the full time sequence.  Configure the plane near
+`RUN_PLANE_TOPOLOGY` in `converge/run_converge.py`.
+
 To validate a case without the full example workflow:
 
 ```bash

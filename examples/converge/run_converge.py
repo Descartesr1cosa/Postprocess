@@ -11,6 +11,8 @@ from pathlib import Path
 from converge_case_io import load_time, open_static_case, release_time, select_inputs
 from converge_core import dynamic_quantities, make_subsolar_samples, prepare_static, reconstruct_additive_B_cell
 from converge_output import write_outputs
+from converge_plane_output import write_plane_topology
+from converge_plane_topology import find_plane_xo_points
 from converge_positions import bow_shock_x, magnetopause_x
 
 
@@ -33,10 +35,20 @@ MEASUREMENTS = {
     "bow_shock_x_RM": bow_shock_x,
 }
 
+# Independent cell-centred X/O topology output.  The selected plane is a slab
+# because no interpolation is performed; choose a tolerance matching your
+# local cell spacing (use 0 for an exactly represented symmetry plane).
+RUN_PLANE_TOPOLOGY = True
+PLANE_NORMAL_AXIS = "y"       # one of: x, y, z
+PLANE_VALUE_RM = 0.0
+PLANE_TOLERANCE_RM = 1.0e-8
+PLANE_FIT_NEIGHBOURS = 12
+
 
 def main() -> None:
     case = open_static_case(DATA_DIR)
     rows = []
+    plane_rows = []
     # This is static, and is therefore deliberately retained through all times.
     additive_b_nd = None
     static = None
@@ -59,13 +71,28 @@ def main() -> None:
             }
             row.update({name: calculator(samples) for name, calculator in MEASUREMENTS.items()})
             rows.append(row)
+            if RUN_PLANE_TOPOLOGY:
+                points = find_plane_xo_points(
+                    static["xyz_RM"], quantities["B_total_T"], quantities["fluid_mask"],
+                    normal_axis=PLANE_NORMAL_AXIS, value_rm=PLANE_VALUE_RM,
+                    tolerance_rm=PLANE_TOLERANCE_RM,
+                    fit_neighbours=PLANE_FIT_NEIGHBOURS,
+                )
+                plane_rows.append({"time": row["time"], "Nstep": row["Nstep"], "points": points})
             print("Processed step={Nstep} time={time:.6e}: mp={magnetopause_x_RM:.4f}, bs={bow_shock_x_RM:.4f}".format(**row))
         finally:
             # Never retain the current flow_field data while advancing time.
             release_time(case)
-    dat_path, json_path = write_outputs(rows, OUTPUT_DIR)
+    dat_path, json_path = write_outputs(
+        rows, OUTPUT_DIR,
+        plane_topology_rows=plane_rows if RUN_PLANE_TOPOLOGY else None,
+    )
     print("Written:", dat_path)
     print("Written:", json_path)
+    if RUN_PLANE_TOPOLOGY:
+        dat_path, detail_path = write_plane_topology(plane_rows, OUTPUT_DIR)
+        print("Written:", dat_path)
+        print("Written:", detail_path)
 
 
 if __name__ == "__main__":

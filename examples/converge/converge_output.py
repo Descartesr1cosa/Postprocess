@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 
 
-def write_outputs(rows: list[dict], output_dir: Path) -> tuple[Path, Path]:
+def write_outputs(rows: list[dict], output_dir: Path, *, plane_topology_rows: list[dict] | None = None) -> tuple[Path, Path]:
     """Write any registered scalar Q values, in addition to time and Nstep."""
     if not rows:
         raise ValueError("No time samples were processed")
@@ -37,6 +37,12 @@ def write_outputs(rows: list[dict], output_dir: Path) -> tuple[Path, Path]:
             "mean": float(np.mean(finite)) if finite.size else None,
             "standard_deviation": float(np.std(finite)) if finite.size else None,
         }
+    if plane_topology_rows is not None:
+        # Keep the independent topology writer separate, while storing its
+        # representative-coordinate statistics in the common JSON summary.
+        from converge_plane_output import topology_coordinate_summary
+
+        summary["plane_topology"] = topology_coordinate_summary(plane_topology_rows)
     json_path = output_dir / "convergence_summary.json"
     json_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return dat_path, json_path
