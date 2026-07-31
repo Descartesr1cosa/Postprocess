@@ -137,12 +137,6 @@ from mpcns_post.tecplot import (
 )
 
 
-# ============================================================
-# User settings for the virtual flight
-# ============================================================
-# Change this to the directory containing the 2008 PDS3 .LBL/.TAB files.
-MESSENGER_DATA_DIR = Path(r"E:\path\to\your\MESSENGER\2008")
-
 FIELDS = [
     "B_total_nT", "H_number_density_cm3", "H_pressure_nPa", "H_temperature_K",
     "Na_number_density_cm3", "Na_pressure_nPa", "Na_temperature_K",
@@ -153,12 +147,17 @@ AVERAGE_WINDOW_SECONDS = None
 SAMPLE_EVERY_SECONDS = 15.0
 
 
-def export_virtual_flight(data: dict) -> None:
+def export_virtual_flight(
+    data: dict,
+    *,
+    messenger_data_dir: Path,
+) -> None:
     """Configure and call the Cell-centred virtual-flight writer."""
     scope = dict(data)
     scope["RUN_VIRTUAL_FLIGHT"] = True
     scope["MERCURY_RADIUS_KM"] = MERCURY_RADIUS_KM
-    scope["MESSENGER_DATA_DIR"] = MESSENGER_DATA_DIR
+    # The top-level switchboard owns this path so a run has one source of truth.
+    scope["MESSENGER_DATA_DIR"] = Path(messenger_data_dir)
     scope["VIRTUAL_FLIGHT_FIELDS"] = FIELDS
     scope["VIRTUAL_FLIGHT_TIME_START"] = TIME_START
     scope["VIRTUAL_FLIGHT_TIME_STOP"] = TIME_STOP
