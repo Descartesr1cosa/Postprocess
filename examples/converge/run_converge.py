@@ -42,7 +42,8 @@ RUN_PLANE_TOPOLOGY = True
 PLANE_NORMAL_AXIS = "y"       # one of: x, y, z
 PLANE_VALUE_RM = 0.0
 PLANE_TOLERANCE_RM = 1.0e-8
-PLANE_FIT_NEIGHBOURS = 12
+# Merge repeated adjacent quadrilateral contours of one physical zero.
+PLANE_MERGE_RADIUS_IN_SPACINGS = 3.0
 
 
 def main() -> None:
@@ -73,12 +74,18 @@ def main() -> None:
             rows.append(row)
             if RUN_PLANE_TOPOLOGY:
                 points = find_plane_xo_points(
-                    static["xyz_RM"], quantities["B_total_T"], quantities["fluid_mask"],
+                    case, quantities["B_total_T"], quantities["fluid_mask"],
                     normal_axis=PLANE_NORMAL_AXIS, value_rm=PLANE_VALUE_RM,
                     tolerance_rm=PLANE_TOLERANCE_RM,
-                    fit_neighbours=PLANE_FIT_NEIGHBOURS,
+                    merge_radius_in_spacings=PLANE_MERGE_RADIUS_IN_SPACINGS,
                 )
                 plane_rows.append({"time": row["time"], "Nstep": row["Nstep"], "points": points})
+                print(
+                    "  Plane X/O points: X={}, O={}".format(
+                        sum(point.kind == "X" for point in points),
+                        sum(point.kind == "O" for point in points),
+                    )
+                )
             print("Processed step={Nstep} time={time:.6e}: mp={magnetopause_x_RM:.4f}, bs={bow_shock_x_RM:.4f}".format(**row))
         finally:
             # Never retain the current flow_field data while advancing time.

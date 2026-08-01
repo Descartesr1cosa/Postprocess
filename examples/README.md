@@ -60,6 +60,13 @@ otherwise nearest neighbours with alternating X/O type are preferred.  Each
 largest point count found in the full time sequence.  Configure the plane near
 `RUN_PLANE_TOPOLOGY` in `converge/run_converge.py`.
 
+Its X/O classification uses true structured-grid four-Cell contours of the
+in-plane magnetic components (for `y=y0`, `Bz,Bx` versus `z,x`), a local 2-D
+Jacobian, its trace/determinant discriminant, and phase winding.  This avoids
+treating every small-|B| Cell as a topological point.
+Adjacent quadrilateral detections are merged by their net winding within the
+configured `PLANE_MERGE_RADIUS_IN_SPACINGS`.
+
 To validate a case without the full example workflow:
 
 ```bash

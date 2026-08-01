@@ -1,7 +1,9 @@
-"""Cell-centre X/O-point search on one Cartesian simulation slice.
+"""Cell-centred X/O-point search on one Cartesian structured-grid slice.
 
-No field interpolation is used: a detected critical point is reported at the
-centre of the Cell that contains its locally fitted zero.
+The detector deliberately uses only values at existing Cell centres.  A point
+is found by the phase winding around a structured four-Cell quadrilateral, and
+the reported coordinate is one of those four Cell centres (never an
+interpolated zero position).
 """
 
 from __future__ import annotations
@@ -50,84 +52,177 @@ def _order_plane_group(points: list[PlanePoint], tangent: tuple[int, int]) -> li
     for axis in tangent:
         order = np.argsort(coordinates[:, axis], kind="stable")
         projected_gap = np.diff(coordinates[order, axis])
-        # A valid monotonic coordinate separates each adjacent point by at
-        # least a quarter of the median point separation in the slice.
         pairwise = np.linalg.norm(coordinates[:, None] - coordinates[None, :], axis=2)
         spacing = float(np.median(pairwise[np.triu_indices(len(points), k=1)]))
         if np.min(projected_gap) >= 0.25 * spacing:
             path = float(np.sum(np.linalg.norm(np.diff(coordinates[order], axis=0), axis=1)))
-            candidates.append((path, axis, order))
+            candidates.append((path, order))
     if candidates:
-        _, _, order = min(candidates, key=lambda item: item[0])
+        _, order = min(candidates, key=lambda item: item[0])
         return [points[index] for index in order]
     return _nearest_type_chain(points)
 
 
-def find_plane_xo_points(xyz_RM: np.ndarray, B_total: np.ndarray, fluid_mask: np.ndarray, *,
-                         normal_axis: str, value_rm: float, tolerance_rm: float,
-                         fit_neighbours: int = 12, root_radius_in_spacings: float = 1.5) -> list[PlanePoint]:
-    """Find X/O points in a Cartesian plane slab using Cell-centred B.
+def _slice_indices(coordinates: np.ndarray, *, normal_axis: int, value_rm: float,
+                   tolerance_rm: float) -> list[tuple[int, int]]:
+    """Find logical-index slices coincident with the requested Cartesian plane."""
+    matches = []
+    for logical_axis in range(3):
+        normal_coordinate = np.moveaxis(coordinates[..., normal_axis], logical_axis, 0)
+        reduce_axes = tuple(range(1, normal_coordinate.ndim))
+        distance = np.max(np.abs(normal_coordinate - value_rm), axis=reduce_axes)
+        for index in np.flatnonzero(distance <= tolerance_rm):
+            matches.append((logical_axis, int(index)))
+    return matches
 
-    At every local minimum of the in-plane field, a least-squares 2-D
-    Jacobian is fitted from nearby slice Cells.  Its zero must lie within a
-    local-cell-scale radius; the sign of its determinant gives X (<0) or O
-    (>0).  Only the candidate Cell centre is returned.
+
+def _quadrilateral_topology(xyz: np.ndarray, b: np.ndarray, gids: np.ndarray,
+                            *, normal_axis: int) -> list[tuple[float, int, int, float, PlanePoint]]:
+    """Detect topological zeros from four neighbouring Cell centres."""
+    tangent = _plane_axes(normal_axis)
+    # For y=y0 this is (z,x) for both coordinates and field components.
+    planar_axes = tuple(reversed(tangent))
+    shape = xyz.shape[:2]
+    found = []
+    for i in range(shape[0] - 1):
+        for j in range(shape[1] - 1):
+            corners = np.array(((i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1)))
+            positions = xyz[corners[:, 0], corners[:, 1]][:, planar_axes]
+            values = b[corners[:, 0], corners[:, 1]][:, planar_axes]
+            if not np.all(np.isfinite(positions)) or not np.all(np.isfinite(values)):
+                continue
+            centre = positions.mean(axis=0)
+            angle = np.arctan2(positions[:, 1] - centre[1], positions[:, 0] - centre[0])
+            order = np.argsort(angle)
+            phase = np.angle(values[order, 0] + 1j * values[order, 1])
+            winding = float(np.sum(np.angle(np.exp(1j * np.diff(np.r_[phase, phase[0]])))) / (2.0 * np.pi))
+            if abs(abs(winding) - 1.0) > 0.25:
+                continue
+            # Least-squares local Jacobian, matching post_flux_rope's
+            # trace/determinant/discriminant topology classification.
+            dx = positions - centre
+            db = values - values.mean(axis=0)
+            if np.linalg.matrix_rank(dx) < 2:
+                continue
+            jacobian = np.linalg.lstsq(dx, db, rcond=None)[0].T
+            trace = float(np.trace(jacobian))
+            determinant = float(np.linalg.det(jacobian))
+            discriminant = trace * trace - 4.0 * determinant
+            if determinant < 0.0 and discriminant > 0.0:
+                kind, expected_winding = "X", -1.0
+            elif determinant > 0.0 and discriminant < 0.0:
+                kind, expected_winding = "O", 1.0
+            else:
+                continue
+            if abs(winding - expected_winding) > 0.25:
+                continue
+            magnitude = np.linalg.norm(values, axis=1)
+            local = int(np.argmin(magnitude))
+            ci, cj = corners[local]
+            gid = int(gids[ci, cj])
+            # Prefer the representative whose in-plane field is smallest.
+            charge = -1 if kind == "X" else 1
+            edge_length = np.linalg.norm(positions - np.roll(positions, -1, axis=0), axis=1)
+            local_spacing = float(np.median(edge_length))
+            found.append((float(magnitude[local]), gid, charge, local_spacing, PlanePoint(kind, xyz[ci, cj].copy())))
+    return found
+
+
+def _merge_nearby_topology(raw: list[tuple[float, int, int, float, PlanePoint]], *,
+                           radius_in_spacings: float) -> list[PlanePoint]:
+    """Merge repeated structured-quadrilateral contours of the same zero."""
+    raw.sort(key=lambda item: item[0])
+    by_gid = []
+    seen_gids = set()
+    for item in raw:
+        if item[1] not in seen_gids:
+            by_gid.append(item)
+            seen_gids.add(item[1])
+    if not by_gid:
+        return []
+    xyz = np.asarray([item[4].xyz_RM for item in by_gid])
+    local_scale = np.asarray([item[3] for item in by_gid])
+    tree = cKDTree(xyz)
+    unseen = set(range(len(by_gid)))
+    merged = []
+    while unseen:
+        root = unseen.pop()
+        component = {root}
+        todo = [root]
+        while todo:
+            index = todo.pop()
+            maximum_radius = radius_in_spacings * max(local_scale[index], float(np.max(local_scale)))
+            neighbours = {
+                other for other in tree.query_ball_point(xyz[index], maximum_radius)
+                if other in unseen
+                and np.linalg.norm(xyz[other] - xyz[index])
+                <= radius_in_spacings * max(local_scale[index], local_scale[other])
+            }
+            unseen -= neighbours
+            component |= neighbours
+            todo.extend(neighbours)
+        entries = [by_gid[index] for index in component]
+        charge = sum(item[2] for item in entries)
+        # A zero net winding is possible when adjacent discrete contours have
+        # opposite signs.  In that tie, retain the lowest-|B| representative
+        # instead of silently losing a physically visible cell-centred point.
+        kind = "X" if charge < 0 else "O" if charge > 0 else min(entries, key=lambda item: item[0])[4].kind
+        compatible = [item for item in entries if item[4].kind == kind]
+        merged.append(min(compatible or entries, key=lambda item: item[0])[4])
+    return merged
+
+
+def find_plane_xo_points(case, B_total: np.ndarray, fluid_mask: np.ndarray, *,
+                         normal_axis: str, value_rm: float, tolerance_rm: float,
+                         merge_radius_in_spacings: float = 3.0) -> list[PlanePoint]:
+    """Find X/O points on an x/y/z=value mesh slice without interpolation.
+
+    A matching logical slice is identified in every Fluid structured block.
+    The method needs the case's block maps, rather than a global point cloud,
+    so each winding contour follows genuine two-dimensional mesh neighbours.
     """
     axis = {"x": 0, "y": 1, "z": 2}.get(normal_axis.lower())
     if axis is None:
         raise ValueError("normal_axis must be 'x', 'y', or 'z'")
     if tolerance_rm < 0.0:
         raise ValueError("tolerance_rm must be non-negative")
-    tangent = _plane_axes(axis)
-    xyz = np.asarray(xyz_RM, dtype=float)
-    field = np.asarray(B_total, dtype=float)
-    fluid = np.asarray(fluid_mask, dtype=bool)
-    selected = fluid & np.isfinite(field).all(axis=1) & (np.abs(xyz[:, axis] - value_rm) <= tolerance_rm)
-    source_indices = np.flatnonzero(selected)
-    if source_indices.size < max(6, fit_neighbours):
+    xyz_all = np.asarray(case.cells.coordinates, dtype=float)
+    b_all = np.asarray(B_total, dtype=float)
+    fluid_all = np.asarray(fluid_mask, dtype=bool)
+    gid_all = np.asarray(case.cells.global_ids)
+    raw = []
+    slices = 0
+    for block in case.iter_blocks(location="cell"):
+        if block.physics != "Fluid":
+            continue
+        xyz = block.reshape(xyz_all)
+        b = block.reshape(b_all)
+        fluid = block.reshape(fluid_all)
+        gids = block.reshape(gid_all)
+        for logical_axis, fixed_index in _slice_indices(
+            xyz, normal_axis=axis, value_rm=value_rm, tolerance_rm=tolerance_rm,
+        ):
+            slice_xyz = np.take(xyz, fixed_index, axis=logical_axis)
+            slice_b = np.take(b, fixed_index, axis=logical_axis)
+            slice_fluid = np.take(fluid, fixed_index, axis=logical_axis)
+            slice_gids = np.take(gids, fixed_index, axis=logical_axis)
+            if min(slice_xyz.shape[:2]) < 2:
+                continue
+            # Reject quadrilaterals touching non-fluid Cells.
+            slice_b = slice_b.copy()
+            slice_b[~slice_fluid] = np.nan
+            raw.extend(_quadrilateral_topology(slice_xyz, slice_b, slice_gids, normal_axis=axis))
+            slices += 1
+    if not slices:
         raise ValueError(
-            "Too few Fluid Cells in plane slab; increase PLANE_TOLERANCE_RM "
-            "or choose a plane represented by the mesh"
+            "No structured Cell slice matches the requested plane; increase PLANE_TOLERANCE_RM "
+            "or choose a mesh-represented symmetry plane"
         )
-    plane_xyz = xyz[source_indices][:, tangent]
-    plane_field = field[source_indices][:, tangent]
-    neighbours = min(int(fit_neighbours), source_indices.size)
-    tree = cKDTree(plane_xyz)
-    distances, nearby = tree.query(plane_xyz, k=neighbours)
-    if neighbours == 1:
-        distances, nearby = distances[:, None], nearby[:, None]
-    spacing = float(np.median(distances[:, 1]))
-    if not np.isfinite(spacing) or spacing <= 0.0:
-        raise ValueError("Plane Cells have zero/invalid nearest-neighbour spacing")
+    chosen = _merge_nearby_topology(
+        raw, radius_in_spacings=merge_radius_in_spacings,
+    )
 
-    chosen: list[PlanePoint] = []
-    for centre, donor_ids in enumerate(nearby):
-        donor_ids = np.asarray(donor_ids, dtype=int)
-        magnitude = np.linalg.norm(plane_field[donor_ids], axis=1)
-        # A real zero is locally smaller than the surrounding sampled field.
-        if magnitude[0] > np.min(magnitude[1:]):
-            continue
-        delta_x = plane_xyz[donor_ids] - plane_xyz[centre]
-        delta_b = plane_field[donor_ids] - plane_field[centre]
-        if np.linalg.matrix_rank(delta_x) < 2:
-            continue
-        # delta_B = J delta_x; use a least-squares local 2-D Jacobian.
-        jacobian = np.linalg.lstsq(delta_x, delta_b, rcond=None)[0].T
-        determinant = float(np.linalg.det(jacobian))
-        if not np.isfinite(determinant) or abs(determinant) <= 1.0e-14:
-            continue
-        root_offset = np.linalg.solve(jacobian, -plane_field[centre])
-        if np.linalg.norm(root_offset) > root_radius_in_spacings * spacing:
-            continue
-        point = PlanePoint("X" if determinant < 0.0 else "O", xyz[source_indices[centre]].copy())
-        # Adjacent Cells can identify one zero.  Keep the closest-to-zero Cell.
-        if any(np.linalg.norm(point.xyz_RM - old.xyz_RM) < spacing for old in chosen):
-            continue
-        chosen.append(point)
-
-    # Tail reconnection X-points remain first.  Within either group, choose
-    # the better of the two slice coordinates for a monotonic chain; only an
-    # overlapping/ambiguous projection falls back to X/O-aware nearest links.
-    tail_x = [p for p in chosen if p.kind == "X" and p.xyz_RM[0] < 0.0]
-    dayside = [p for p in chosen if p.xyz_RM[0] >= 0.0]
+    tangent = _plane_axes(axis)
+    tail_x = [point for point in chosen if point.kind == "X" and point.xyz_RM[0] < 0.0]
+    dayside = [point for point in chosen if point.xyz_RM[0] >= 0.0]
     return _order_plane_group(tail_x, tangent) + _order_plane_group(dayside, tangent)
