@@ -44,6 +44,9 @@ PLANE_VALUE_RM = 0.0
 PLANE_TOLERANCE_RM = 1.0e-8
 # Merge repeated adjacent quadrilateral contours of one physical zero.
 PLANE_MERGE_RADIUS_IN_SPACINGS = 3.0
+# "cell_center": existing grid Cell centre; "interpolated": local affine
+# B_t=0 coordinate in the accepted four-Cell topology contour.
+PLANE_POINT_POSITION_MODE = "cell_center"
 
 
 def main() -> None:
@@ -78,8 +81,12 @@ def main() -> None:
                     normal_axis=PLANE_NORMAL_AXIS, value_rm=PLANE_VALUE_RM,
                     tolerance_rm=PLANE_TOLERANCE_RM,
                     merge_radius_in_spacings=PLANE_MERGE_RADIUS_IN_SPACINGS,
+                    position_mode=PLANE_POINT_POSITION_MODE,
                 )
-                plane_rows.append({"time": row["time"], "Nstep": row["Nstep"], "points": points})
+                plane_rows.append({
+                    "time": row["time"], "Nstep": row["Nstep"], "points": points,
+                    "coordinate_mode": PLANE_POINT_POSITION_MODE,
+                })
                 print(
                     "  Plane X/O points: X={}, O={}".format(
                         sum(point.kind == "X" for point in points),

@@ -60,6 +60,9 @@ def write_plane_topology(rows: list[dict], output_dir: Path) -> tuple[Path, Path
     """Write zero-padded point coordinates, with columns sized for max count."""
     if not rows:
         raise ValueError("No slice-topology samples were processed")
+    coordinate_mode = rows[0].get("coordinate_mode", "cell_center")
+    if any(row.get("coordinate_mode", coordinate_mode) != coordinate_mode for row in rows):
+        raise ValueError("Every topology row must use the same coordinate mode")
     max_points = max(len(row["points"]) for row in rows)
     variables = ["time", "Nstep"] + [
         name for index in range(max_points)
@@ -69,7 +72,8 @@ def write_plane_topology(rows: list[dict], output_dir: Path) -> tuple[Path, Path
     output_dir.mkdir(parents=True, exist_ok=True)
     dat_path = output_dir / "plane_xo_points.dat"
     with dat_path.open("w", encoding="ascii", newline="\n") as stream:
-        stream.write('TITLE = "MPCNS Cartesian-plane X/O-point cell centres"\n')
+        title = "cell centres" if coordinate_mode == "cell_center" else "local affine zero estimates"
+        stream.write(f'TITLE = "MPCNS Cartesian-plane X/O-point {title}"\n')
         stream.write("# type_i: -1 = not found; 0 = X-point; 1 = O-point\n")
         stream.write("# point slots: tail X-points first, then dayside X/O topology chain\n")
         stream.write("VARIABLES = " + ", ".join(f'\"{name}\"' for name in variables) + "\n")
@@ -85,6 +89,7 @@ def write_plane_topology(rows: list[dict], output_dir: Path) -> tuple[Path, Path
 
     detail = {
         "maximum_point_count": max_points,
+        "coordinate_mode": coordinate_mode,
         "type_encoding": {"-1": "not found", "0": "X-point", "1": "O-point"},
         "slot_order": "tail X-points first, then dayside X/O topology chain; uses a monotonic in-plane coordinate when possible, otherwise an X/O-aware nearest-neighbour chain",
         "samples": [

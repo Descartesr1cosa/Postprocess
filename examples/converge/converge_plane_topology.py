@@ -1,9 +1,8 @@
-"""Cell-centred X/O-point search on one Cartesian structured-grid slice.
+"""Structured-grid X/O-point search on one Cartesian slice.
 
-The detector deliberately uses only values at existing Cell centres.  A point
-is found by the phase winding around a structured four-Cell quadrilateral, and
-the reported coordinate is one of those four Cell centres (never an
-interpolated zero position).
+Topology is always detected from existing Cell-centred fields on structured
+four-Cell quadrilaterals. Coordinates can be grid-locked Cell centres or local
+affine zero estimates within an accepted quadrilateral.
 """
 
 from __future__ import annotations
@@ -77,7 +76,8 @@ def _slice_indices(coordinates: np.ndarray, *, normal_axis: int, value_rm: float
 
 
 def _quadrilateral_topology(xyz: np.ndarray, b: np.ndarray, gids: np.ndarray,
-                            *, normal_axis: int) -> list[tuple[float, int, int, float, PlanePoint]]:
+                            *, normal_axis: int, position_mode: str,
+                            plane_value_rm: float) -> list[tuple[float, int, int, float, PlanePoint]]:
     """Detect topological zeros from four neighbouring Cell centres."""
     tangent = _plane_axes(normal_axis)
     # For y=y0 this is (z,x) for both coordinates and field components.
@@ -120,11 +120,20 @@ def _quadrilateral_topology(xyz: np.ndarray, b: np.ndarray, gids: np.ndarray,
             local = int(np.argmin(magnitude))
             ci, cj = corners[local]
             gid = int(gids[ci, cj])
+            if position_mode == "cell_center":
+                point_xyz = xyz[ci, cj].copy()
+            else:
+                # B_t ~= mean(B_t) + J (r_t - mean(r_t)); this only locates
+                # the already accepted topology and does not reclassify it.
+                root_planar = centre - np.linalg.solve(jacobian, values.mean(axis=0))
+                point_xyz = xyz[corners[:, 0], corners[:, 1]].mean(axis=0)
+                point_xyz[list(planar_axes)] = root_planar
+                point_xyz[normal_axis] = plane_value_rm
             # Prefer the representative whose in-plane field is smallest.
             charge = -1 if kind == "X" else 1
             edge_length = np.linalg.norm(positions - np.roll(positions, -1, axis=0), axis=1)
             local_spacing = float(np.median(edge_length))
-            found.append((float(magnitude[local]), gid, charge, local_spacing, PlanePoint(kind, xyz[ci, cj].copy())))
+            found.append((float(magnitude[local]), gid, charge, local_spacing, PlanePoint(kind, point_xyz)))
     return found
 
 
@@ -174,18 +183,22 @@ def _merge_nearby_topology(raw: list[tuple[float, int, int, float, PlanePoint]],
 
 def find_plane_xo_points(case, B_total: np.ndarray, fluid_mask: np.ndarray, *,
                          normal_axis: str, value_rm: float, tolerance_rm: float,
-                         merge_radius_in_spacings: float = 3.0) -> list[PlanePoint]:
-    """Find X/O points on an x/y/z=value mesh slice without interpolation.
+                         merge_radius_in_spacings: float = 3.0,
+                         position_mode: str = "cell_center") -> list[PlanePoint]:
+    """Find X/O points on an x/y/z=value mesh slice.
 
     A matching logical slice is identified in every Fluid structured block.
     The method needs the case's block maps, rather than a global point cloud,
     so each winding contour follows genuine two-dimensional mesh neighbours.
+    ``position_mode`` is ``cell_center`` or ``interpolated``.
     """
     axis = {"x": 0, "y": 1, "z": 2}.get(normal_axis.lower())
     if axis is None:
         raise ValueError("normal_axis must be 'x', 'y', or 'z'")
     if tolerance_rm < 0.0:
         raise ValueError("tolerance_rm must be non-negative")
+    if position_mode not in {"cell_center", "interpolated"}:
+        raise ValueError("position_mode must be 'cell_center' or 'interpolated'")
     xyz_all = np.asarray(case.cells.coordinates, dtype=float)
     b_all = np.asarray(B_total, dtype=float)
     fluid_all = np.asarray(fluid_mask, dtype=bool)
@@ -211,7 +224,11 @@ def find_plane_xo_points(case, B_total: np.ndarray, fluid_mask: np.ndarray, *,
             # Reject quadrilaterals touching non-fluid Cells.
             slice_b = slice_b.copy()
             slice_b[~slice_fluid] = np.nan
-            raw.extend(_quadrilateral_topology(slice_xyz, slice_b, slice_gids, normal_axis=axis))
+            raw.extend(_quadrilateral_topology(
+                slice_xyz, slice_b, slice_gids,
+                normal_axis=axis, position_mode=position_mode,
+                plane_value_rm=value_rm,
+            ))
             slices += 1
     if not slices:
         raise ValueError(

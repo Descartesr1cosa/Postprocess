@@ -67,6 +67,10 @@ treating every small-|B| Cell as a topological point.
 Adjacent quadrilateral detections are merged by their net winding within the
 configured `PLANE_MERGE_RADIUS_IN_SPACINGS`.
 
+`PLANE_POINT_POSITION_MODE` selects the coordinate output: `cell_center`
+reports the existing representative Cell centre, while `interpolated` reports
+the local affine `B_t=0` estimate in the accepted four-Cell contour.
+
 To validate a case without the full example workflow:
 
 ```bash
