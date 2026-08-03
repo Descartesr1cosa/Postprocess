@@ -70,7 +70,7 @@ def write_plane_topology(rows: list[dict], output_dir: Path) -> tuple[Path, Path
     dat_path = output_dir / "plane_xo_points.dat"
     with dat_path.open("w", encoding="ascii", newline="\n") as stream:
         stream.write('TITLE = "MPCNS Cartesian-plane X/O-point cell centres"\n')
-        stream.write("# type_i: 0 = X-point; 1 = O-point\n")
+        stream.write("# type_i: -1 = not found; 0 = X-point; 1 = O-point\n")
         stream.write("# point slots: tail X-points first, then dayside X/O topology chain\n")
         stream.write("VARIABLES = " + ", ".join(f'\"{name}\"' for name in variables) + "\n")
         stream.write(f"ZONE T=\"plane X/O history\", I={len(rows)}, F=POINT\n")
@@ -79,12 +79,13 @@ def write_plane_topology(rows: list[dict], output_dir: Path) -> tuple[Path, Path
             for point in row["points"]:
                 values.extend(np.asarray(point.xyz_RM, dtype=float))
                 values.append(0.0 if point.kind == "X" else 1.0)
-            values.extend([0.0] * (4 * (max_points - len(row["points"]))))
+            for _ in range(max_points - len(row["points"])):
+                values.extend((0.0, 0.0, 0.0, -1.0))
             stream.write(" ".join(f"{value:.12e}" for value in values) + "\n")
 
     detail = {
         "maximum_point_count": max_points,
-        "type_encoding": {"0": "X-point", "1": "O-point"},
+        "type_encoding": {"-1": "not found", "0": "X-point", "1": "O-point"},
         "slot_order": "tail X-points first, then dayside X/O topology chain; uses a monotonic in-plane coordinate when possible, otherwise an X/O-aware nearest-neighbour chain",
         "samples": [
             {"time": row["time"], "Nstep": row["Nstep"],
