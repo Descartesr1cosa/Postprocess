@@ -46,7 +46,7 @@ PLANE_TOLERANCE_RM = 1.0e-8
 PLANE_MERGE_RADIUS_IN_SPACINGS = 3.0
 # "cell_center": existing grid Cell centre; "interpolated": local affine
 # B_t=0 coordinate in the accepted four-Cell topology contour.
-PLANE_POINT_POSITION_MODE = "cell_center"
+PLANE_POINT_POSITION_MODE = "interpolated"
 
 
 def main() -> None:
