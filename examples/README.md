@@ -77,6 +77,14 @@ through configurable virtual spheres.  Set `NA_FLUX_RADII_RM` and
 `NA_SPHERE_SAMPLE_COUNT` in `run_converge.py`; the quantities are added to the
 same convergence Tecplot history and JSON summary.
 
+## Resumable time processing
+
+Every completed time step is immediately checkpointed as a JSON file under
+`DATA_DIR/temp_post_data`, named with its `Nstep` and `Time`.  On later runs,
+compatible cached steps are verified and reused without opening their dynamic
+`flow_field####.bin` files.  The final files in `tecplot_output` are built from
+the union of `DATA_archive` times and valid `temp_post_data` cache times.
+
 To validate a case without the full example workflow:
 
 ```bash
