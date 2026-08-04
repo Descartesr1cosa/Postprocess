@@ -11,6 +11,7 @@ from pathlib import Path
 from converge_case_io import load_time, open_static_case, release_time, select_inputs
 from converge_core import dynamic_quantities, make_subsolar_samples, prepare_static, reconstruct_additive_B_cell
 from converge_output import write_outputs
+from converge_na_statistics import build_sphere_flux_samplers, compute_na_statistics
 from converge_plane_output import write_plane_topology
 from converge_plane_topology import find_plane_xo_points
 from converge_positions import bow_shock_x, magnetopause_x
@@ -34,6 +35,16 @@ MEASUREMENTS = {
     "magnetopause_x_RM": magnetopause_x,
     "bow_shock_x_RM": bow_shock_x,
 }
+MEASUREMENT_UNITS = {
+    "magnetopause_x_RM": "Mercury radii (R_M)",
+    "bow_shock_x_RM": "Mercury radii (R_M)",
+}
+
+# Whole-fluid-domain Na+ number-density statistics and net outward particle
+# flux through virtual spheres centred at Mercury.
+RUN_NA_STATISTICS = True
+NA_FLUX_RADII_RM = (1.5, 1.9, 5.0)
+NA_SPHERE_SAMPLE_COUNT = 4096
 
 # Independent cell-centred X/O topology output.  The selected plane is a slab
 # because no interpolation is performed; choose a tolerance matching your
@@ -56,12 +67,18 @@ def main() -> None:
     # This is static, and is therefore deliberately retained through all times.
     additive_b_nd = None
     static = None
+    na_sphere_samplers = None
     for source in select_inputs(DATA_DIR):
         try:
             step, time = load_time(case, source.path)
             if additive_b_nd is None:
                 additive_b_nd = reconstruct_additive_B_cell(case)
                 static = prepare_static(case)
+                if RUN_NA_STATISTICS:
+                    na_sphere_samplers = build_sphere_flux_samplers(
+                        case, static["fluid_mask"], NA_FLUX_RADII_RM,
+                        sphere_sample_count=NA_SPHERE_SAMPLE_COUNT,
+                    )
             quantities = dynamic_quantities(case, additive_b_nd)
             samples = make_subsolar_samples(
                 static, quantities,
@@ -74,6 +91,14 @@ def main() -> None:
                 "Nstep": step if source.step is None else source.step,
             }
             row.update({name: calculator(samples) for name, calculator in MEASUREMENTS.items()})
+            if RUN_NA_STATISTICS:
+                na_values = compute_na_statistics(case, quantities["fluid_mask"], na_sphere_samplers)
+                row.update(na_values)
+                MEASUREMENT_UNITS.update({
+                    "Na_number_density_domain_mean_cm3": "cm^-3",
+                    "Na_number_density_domain_std_cm3": "cm^-3",
+                    **{name: "particles/s" for name in na_values if name.startswith("Na_flux_")},
+                })
             rows.append(row)
             if RUN_PLANE_TOPOLOGY:
                 points = find_plane_xo_points(
@@ -100,6 +125,7 @@ def main() -> None:
     dat_path, json_path = write_outputs(
         rows, OUTPUT_DIR,
         plane_topology_rows=plane_rows if RUN_PLANE_TOPOLOGY else None,
+        quantity_units=MEASUREMENT_UNITS,
     )
     print("Written:", dat_path)
     print("Written:", json_path)

@@ -71,6 +71,12 @@ configured `PLANE_MERGE_RADIUS_IN_SPACINGS`.
 reports the existing representative Cell centre, while `interpolated` reports
 the local affine `B_t=0` estimate in the accepted four-Cell contour.
 
+`converge/converge_na_statistics.py` adds full-fluid-domain, volume-weighted
+Na+ density mean/standard deviation and signed outward Na+ particle fluxes
+through configurable virtual spheres.  Set `NA_FLUX_RADII_RM` and
+`NA_SPHERE_SAMPLE_COUNT` in `run_converge.py`; the quantities are added to the
+same convergence Tecplot history and JSON summary.
+
 To validate a case without the full example workflow:
 
 ```bash

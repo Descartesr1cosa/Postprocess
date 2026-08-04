@@ -8,7 +8,8 @@ from pathlib import Path
 import numpy as np
 
 
-def write_outputs(rows: list[dict], output_dir: Path, *, plane_topology_rows: list[dict] | None = None) -> tuple[Path, Path]:
+def write_outputs(rows: list[dict], output_dir: Path, *, plane_topology_rows: list[dict] | None = None,
+                  quantity_units: dict[str, str] | None = None) -> tuple[Path, Path]:
     """Write any registered scalar Q values, in addition to time and Nstep."""
     if not rows:
         raise ValueError("No time samples were processed")
@@ -27,12 +28,13 @@ def write_outputs(rows: list[dict], output_dir: Path, *, plane_topology_rows: li
         for row in rows:
             stream.write(" ".join(f"{float(row[name]):.12e}" for name in variables) + "\n")
 
+    quantity_units = {} if quantity_units is None else quantity_units
     summary = {"sample_count": len(rows), "quantities": {}}
     for name in variables[2:]:
         values = np.asarray([row[name] for row in rows], dtype=float)
         finite = values[np.isfinite(values)]
         summary["quantities"][name] = {
-            "unit": "Mercury radii (R_M)",
+            "unit": quantity_units.get(name, "unspecified"),
             "valid_sample_count": int(finite.size),
             "mean": float(np.mean(finite)) if finite.size else None,
             "standard_deviation": float(np.std(finite)) if finite.size else None,
