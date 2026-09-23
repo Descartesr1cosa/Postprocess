@@ -95,3 +95,49 @@ python examples/validate_case_dec.py /path/to/DATA_bin \
 python examples/validate_case_dec.py /path/to/DATA_bin \
   --data-dir /path/to/DATA --validate-debug
 ```
+
+## Time-series analysis example
+
+`analysis/` is the incremental science-analysis workflow.  It follows the
+same memory-safe lifecycle as `converge/`: static `DATA_bin` is loaded once;
+each archived flow field is loaded, analysed, checkpointed, released, and then
+the next time is opened.  Edit `analysis/run_analysis.py` and run:
+
+```bash
+python examples/analysis/run_analysis.py
+```
+
+Its `OPERATIONS` list is a one-line switchboard: comment an operation line to
+disable it.  The first implementation writes these scalar quantities:
+
+- subsolar `R_MP`, `R_BS`, and resolved bow-shock jumps in `|B|`, total ion
+  pressure, and H+ density (downstream minus upstream);
+- total Na+ inventory and total photoionization source rate;
+- surface loss/return and outer-boundary escape/inflow, with the signed net
+  retained for each;
+- net, outward-only, and inward-only Na+ virtual-sphere fluxes at every radius
+  in `NA_SPHERE_RADII_RM`;
+- a configurable circular tail-plane flux, with tailward and sunward parts
+  kept distinct;
+- configurable geometric near-surface, cusp, mantle, plasma-sheet, tail, and
+  dayside magnetosheath-proxy region inventories plus topology-defined
+  enclosing-boundary net/outward/inward fluxes and per-region y/z asymmetry;
+- full-domain `y>0/y<0` and `z>0/z<0` Na+ inventories and asymmetry
+  `A=(N_+-N_-)/(N_++N_-)`.
+
+Products are isolated under `DATA_DIR/tecplot_output/analysis/`:
+
+- `scalars/analysis_time_history.dat` and `analysis_summary.json` are the
+  reusable time/Nstep scalar results;
+- `cache/Nstep_*_Time_*.json` is the resumable per-time record;
+- `volume/<time>.plt` is a complete binary Tecplot file per output time.  It
+  contains all Fluid blocks at globally shared **Nodes**: Cell fields are
+  projected with the same global Cell-to-Node reconstruction as `post/`, so
+  interfaces connect continuously.  Variables include `X/Y/Z`, bulk `U`,
+  H+/Na+/total density and pressure, total `B`, Cartesian `J`, `|J|`,
+  `J_perp`, FAC, and the three requested Na+ composition ratios.  Create any
+  desired slice interactively in Tecplot from this 3-D data.
+
+The runner normally processes all available times.  For an inexpensive single
+time smoke test, run it with `MPCNS_ANALYSIS_MAX_TIME_SAMPLES=1` in the
+environment.
