@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 
 from analysis_cache import discover_time_caches, read_time_cache, write_time_cache
+from analysis_budget import BUDGET_UNITS, add_budget_columns
 from analysis_case_io import discover_time_directories, load_time, open_static_case, release_time, select_inputs
 from analysis_na import (
     make_na_asymmetry_operation,
@@ -23,7 +24,7 @@ from analysis_na import (
     make_na_sphere_flux_operation,
     make_na_tail_plane_flux_operation,
 )
-from analysis_output import write_scalar_outputs
+from analysis_output import write_cross_case_window_summary, write_scalar_outputs
 from analysis_regions import make_na_region_operation
 from analysis_volume import make_node_volume_operation
 from analysis_structure import make_global_structure_operation
@@ -32,6 +33,9 @@ from analysis_structure import make_global_structure_operation
 # DATA_DIR contains DATA_bin plus DATA_archive/Step_*_Time_* (recommended),
 # or one current DATA directory.
 DATA_DIR = Path(r"E:\\2_ClassFiles\\x2025\\Autumn\\Mercury\\python\\999_Post\\DATA\\out56-Na0")
+# Multiplies the baseline neutral-Na photoionization source.  Set 0.0 to turn
+# off Q_src, 1.0 for the normal rate, or a larger value for sensitivity tests.
+sodium_load_factor: float = 0.0
 ANALYSIS_DIR = DATA_DIR / "tecplot_output" / "analysis"
 SCALAR_DIR = ANALYSIS_DIR / "scalars"
 VOLUME_DIR = ANALYSIS_DIR / "volume"      # One connected 3-D <time>.plt per time.
@@ -39,6 +43,14 @@ CACHE_DIR = ANALYSIS_DIR / "cache"        # Restartable per-time JSON records.
 # Leave as None for all available times.  The environment override below is
 # convenient for a low-cost smoke test: MPCNS_ANALYSIS_MAX_TIME_SAMPLES=1.
 MAX_TIME_SAMPLES = None
+
+# Inclusive quasi-steady windows in solver time units.  Add/edit entries for
+# each interval of interest; every window gets mean/std/min/max automatically.
+QUASI_STEADY_WINDOWS: tuple[tuple[float, float], ...] = ((40.0, 60.0),)
+
+# Existing cases to aggregate after this case is written.  Add other DATA_DIRs
+# only after they have been analysed with the same window configuration.
+CROSS_CASE_DATA_DIRS: tuple[Path, ...] = (DATA_DIR,)
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +71,7 @@ LOCAL_AVERAGE_CELLS = 5
 SURFACE_RADIUS_MAX_RM = 1.05
 
 # Freely edit this tuple.  Every radius receives net/outward/inward columns.
-NA_SPHERE_RADII_RM = (1.5, 1.9, 5.0)
+NA_SPHERE_RADII_RM = (1.9, 3.0, 4.0, 5.0)
 NA_SPHERE_SAMPLE_COUNT = 4096
 
 # Circular tail-plane transport, with positive meaning anti-sunward (-x).
@@ -90,7 +102,7 @@ OPERATIONS = [
         max_x_rm=MAX_X_RM, neighbours=LOCAL_AVERAGE_CELLS,
     ),
     make_na_inventory_operation(),
-    make_na_source_operation(),
+    make_na_source_operation(sodium_load_factor=sodium_load_factor),
     make_na_boundary_budget_operation(surface_radius_max_rm=SURFACE_RADIUS_MAX_RM),
     make_na_sphere_flux_operation(
         radii_rm=NA_SPHERE_RADII_RM, sphere_sample_count=NA_SPHERE_SAMPLE_COUNT,
@@ -101,7 +113,7 @@ OPERATIONS = [
     ),
     make_na_region_operation(regions=NA_REGIONS),
     make_na_asymmetry_operation(),
-    make_node_volume_operation(output_dir=VOLUME_DIR),
+    # make_node_volume_operation(output_dir=VOLUME_DIR),
 ]
 
 
@@ -194,10 +206,21 @@ def main() -> None:
             if case is not None:
                 release_time(case)
 
-    rows.sort(key=lambda row: (row["Nstep"], row["time"]))
-    dat_path, json_path = write_scalar_outputs(rows, SCALAR_DIR, units=units)
+    rows.sort(key=lambda row: (row["time"], row["Nstep"]))
+    rows = add_budget_columns(rows)
+    output_units = {**units, **BUDGET_UNITS}
+    dat_path, json_path, window_path = write_scalar_outputs(
+        rows, SCALAR_DIR, units=output_units,
+        quasi_steady_windows=QUASI_STEADY_WINDOWS,
+    )
     print("Written:", dat_path)
     print("Written:", json_path)
+    if window_path is not None:
+        print("Written:", window_path)
+    cross_case_path = write_cross_case_window_summary(
+        CROSS_CASE_DATA_DIRS, ANALYSIS_DIR / "cross_case_window_summary.csv",
+    )
+    print("Written:", cross_case_path)
     print("3-D Tecplot directory:", VOLUME_DIR)
 
 

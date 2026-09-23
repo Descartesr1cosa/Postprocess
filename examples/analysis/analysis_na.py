@@ -71,20 +71,33 @@ def make_na_asymmetry_operation() -> AnalysisOperation:
     return AnalysisOperation(name="na_global_asymmetry", calculate=calculate, units=units)
 
 
-def make_na_source_operation() -> AnalysisOperation:
-    """Integrate static Photo_rate (cm^-3 s^-1) into total Na+ source rate."""
+def make_na_source_operation(*, sodium_load_factor: float) -> AnalysisOperation:
+    """Integrate scaled Photo_rate (cm^-3 s^-1) into total Na+ source rate."""
+    factor = float(sodium_load_factor)
+    if not np.isfinite(factor) or factor < 0.0:
+        raise ValueError("sodium_load_factor must be finite and non-negative")
+
     def calculate(case, state: dict) -> dict[str, float]:
+        if factor == 0.0:
+            return {"Na_photoionization_source_particles_s": 0.0}
         fluid = current_fluid_mask(case)
         photo_rate_cm3_s = np.asarray(case.get_field("Photo_rate"), dtype=float)
         if photo_rate_cm3_s.shape != fluid.shape or np.any(~np.isfinite(photo_rate_cm3_s[fluid])):
             raise ValueError("Photo_rate must be finite on all Fluid Cells")
-        source_particles_s = np.sum(photo_rate_cm3_s[fluid] * 1.0e6 * cell_volume_m3(case)[fluid], dtype=np.float64)
+        source_particles_s = factor * np.sum(
+            photo_rate_cm3_s[fluid] * 1.0e6 * cell_volume_m3(case)[fluid],
+            dtype=np.float64,
+        )
         return {"Na_photoionization_source_particles_s": float(source_particles_s)}
 
     return AnalysisOperation(
         name="na_photoionization_source", calculate=calculate,
         units={"Na_photoionization_source_particles_s": "particles/s"},
-        configuration={"Photo_rate_units": "cm^-3 s^-1"},
+        configuration={
+            "Photo_rate_units": "cm^-3 s^-1",
+            "sodium_load_factor": factor,
+            "source_definition": "sodium_load_factor * integral(Photo_rate dV)",
+        },
     )
 
 

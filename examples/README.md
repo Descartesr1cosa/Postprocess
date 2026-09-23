@@ -141,3 +141,19 @@ Products are isolated under `DATA_DIR/tecplot_output/analysis/`:
 The runner normally processes all available times.  For an inexpensive single
 time smoke test, run it with `MPCNS_ANALYSIS_MAX_TIME_SAMPLES=1` in the
 environment.
+
+`sodium_load_factor` is immediately below `DATA_DIR`: `0.0` disables the Na
+photoionization source, `1.0` retains the saved baseline, and larger values
+apply sensitivity scaling.  The saved source is
+`Q_src=sodium_load_factor*integral(Photo_rate dV)`.
+
+The final scalar history additionally contains `Na_inventory_time_derivative_particles_s`
+and `Na_budget_residual_particles_s = dot(N) - Q_src + Phi_surface_net +
+Phi_outer_net`.  The signed net surface/outer-boundary fluxes are required for
+closure; positive-only `loss` and `escape` remain separate one-way reporting
+diagnostics.
+Configure `QUASI_STEADY_WINDOWS` in `run_analysis.py`; each inclusive window
+gets mean, standard deviation, minimum, and maximum in both
+`analysis_summary.json` and `analysis_quasi_steady_windows.dat`.  Add existing
+case directories to `CROSS_CASE_DATA_DIRS` to write a combined long-form
+`cross_case_window_summary.csv`.
