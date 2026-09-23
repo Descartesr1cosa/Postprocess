@@ -35,6 +35,8 @@ from analysis_structure import make_global_structure_operation
 DATA_DIR = Path(r"E:\\2_ClassFiles\\x2025\\Autumn\\Mercury\\python\\999_Post\\DATA\\out56-Na0")
 # Multiplies the baseline neutral-Na photoionization source.  Set 0.0 to turn
 # off Q_src, 1.0 for the normal rate, or a larger value for sensitivity tests.
+# DATA_bin is old (normal Photo_rate), sodium_load_factor should be correct factor(e.g. 0.0 1.0 5.0)
+# DATA_bin is new (scaled Photo_rate), sodium_load_factor should be 1.0
 sodium_load_factor: float = 0.0
 ANALYSIS_DIR = DATA_DIR / "tecplot_output" / "analysis"
 SCALAR_DIR = ANALYSIS_DIR / "scalars"
